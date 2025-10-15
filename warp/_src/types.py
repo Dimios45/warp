@@ -4080,6 +4080,140 @@ class tile(Tile[DType, Shape]):
     def align(self, bytes):
         return tile.round_up(bytes)
 
+    def __truediv__(self, other):
+        """Element-wise true division of this tile by another tile or scalar.
+        
+        Supports both tile/tile and tile/scalar division using wp.tile_map for
+        element-wise operation delegation.
+        
+        Args:
+            other: Another tile or scalar value to divide by
+            
+        Returns:
+            A new tile with the result of element-wise division
+        """
+        import warp as wp
+        if is_tile(other):
+            # tile / tile -> element-wise division using tile_map
+            return wp.tile_map(wp.div, self, other)
+        else:
+            # tile / scalar -> element-wise division using tile_map
+            return wp.tile_map(wp.div, self, other)
+
+    def __rtruediv__(self, other):
+        """Element-wise true division with this tile as the denominator.
+        
+        Supports both scalar/tile and tile/tile division (when other is a tile)
+        using wp.tile_map for element-wise operation delegation.
+        
+        Args:
+            other: Another tile or scalar value to divide from
+            
+        Returns:
+            A new tile with the result of element-wise division (other / self)
+        """
+        import warp as wp
+        if is_tile(other):
+            # scalar / tile -> element-wise division using tile_map
+            return wp.tile_map(wp.div, other, self)
+        else:
+            # scalar / tile -> element-wise division using tile_map
+            return wp.tile_map(wp.div, other, self)
+
+    def __itruediv__(self, other):
+        """In-place element-wise true division of this tile by another tile or scalar.
+        
+        Supports both tile/tile and tile/scalar in-place division using wp.tile_map
+        for element-wise operation delegation and runtime.core.wp_tile_assign for
+        in-place assignment.
+        
+        Args:
+            other: Another tile or scalar value to divide by
+            
+        Returns:
+            self (with modified values in-place)
+        """
+        import warp as wp
+        if is_tile(other):
+            # tile /= tile -> in-place element-wise division
+            result = wp.tile_map(wp.div, self, other)
+            from warp._src.context import runtime
+            runtime.core.wp_tile_assign(self, result)
+            return self
+        else:
+            # tile /= scalar -> in-place element-wise division
+            result = wp.tile_map(wp.div, self, other)
+            from warp._src.context import runtime
+            runtime.core.wp_tile_assign(self, result)
+            return self
+
+    def __floordiv__(self, other):
+        """Element-wise floor division of this tile by another tile or scalar.
+        
+        Supports both tile/tile and tile/scalar floor division using wp.tile_map for
+        element-wise operation delegation.
+        
+        Args:
+            other: Another tile or scalar value to floor-divide by
+            
+        Returns:
+            A new tile with the result of element-wise floor division
+        """
+        import warp as wp
+        if is_tile(other):
+            # tile // tile -> element-wise floor division using tile_map
+            return wp.tile_map(wp.floordiv, self, other)
+        else:
+            # tile // scalar -> element-wise floor division using tile_map
+            return wp.tile_map(wp.floordiv, self, other)
+
+    def __rfloordiv__(self, other):
+        """Element-wise floor division with this tile as the denominator.
+        
+        Supports both scalar/tile and tile/tile floor division (when other is a tile)
+        using wp.tile_map for element-wise operation delegation.
+        
+        Args:
+            other: Another tile or scalar value to floor-divide from
+            
+        Returns:
+            A new tile with the result of element-wise floor division (other // self)
+        """
+        import warp as wp
+        if is_tile(other):
+            # scalar // tile -> element-wise floor division using tile_map
+            return wp.tile_map(wp.floordiv, other, self)
+        else:
+            # scalar // tile -> element-wise floor division using tile_map
+            return wp.tile_map(wp.floordiv, other, self)
+
+    def __ifloordiv__(self, other):
+        """In-place element-wise floor division of this tile by another tile or scalar.
+        
+        Supports both tile/tile and tile/scalar in-place floor division using wp.tile_map
+        for element-wise operation delegation and runtime.core.wp_tile_assign for
+        in-place assignment.
+        
+        Args:
+            other: Another tile or scalar value to floor-divide by
+            
+        Returns:
+            self (with modified values in-place)
+        """
+        import warp as wp
+        if is_tile(other):
+            # tile //= tile -> in-place element-wise floor division
+            result = wp.tile_map(wp.floordiv, self, other)
+            from warp._src.context import runtime
+            runtime.core.wp_tile_assign(self, result)
+            return self
+        else:
+            # tile //= scalar -> in-place element-wise floor division
+            result = wp.tile_map(wp.floordiv, self, other)
+            from warp._src.context import runtime
+            runtime.core.wp_tile_assign(self, result)
+            return self
+
 
 def is_tile(t):
     return isinstance(t, tile)

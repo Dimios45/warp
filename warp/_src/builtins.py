@@ -8737,6 +8737,12 @@ add_builtin(
     group="Operators",
 )
 
+# For tile division operations, the Python methods in the tile class handle this
+# via tile_map operations. The appropriate builtins should already be available
+# through the tile_map implementation which handles binary operations.
+# Note: Adding explicit div/floordiv overloads for tiles causes import issues
+# due to tile type mangling, so the tile class __ methods should handle this.
+
 add_builtin(
     "floordiv",
     input_types={"a": Scalar, "b": Scalar},
