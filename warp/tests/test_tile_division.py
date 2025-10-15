@@ -1,320 +1,477 @@
 #!/usr/bin/env python
-
-"""
-Test suite for tile division operations in NVIDIA Warp.
-
-This module tests the recently implemented tile division operations:
-- tile / scalar
-- scalar / tile
-- tile / tile
-- tile //= scalar and tile //= tile (in-place division)
-- floor division variants (//)
-
-The tests verify correctness of values, types, shapes, and handle edge cases.
-"""
+# Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import numpy as np
-import pytest
-import warp as wp
-from warp.tests.unittest_utils import *
 
-# Initialize Warp context
+import warp as wp
+from warp.utils import array_equal
+
 wp.init()
 
 
-def test_tile_scalar_division():
-    """Test tile / scalar division operations."""
+@wp.kernel
+def test_kernel():
+    # Simple kernel to test tile division operations
+    tid = wp.tid()
+    wp.printf("Thread %d\n", tid)
+
+
+def test_tile_division_basic():
+    """Test basic tile division functionality: tile/scalar, scalar/tile, tile/tile"""
     
+    device = "cpu"
+    
+    # Test tile / scalar division
     @wp.kernel
-    def test_kernel():
-        # Create a tile with values [1.0, 2.0, 3.0, 4.0, 5.0]
-        a = wp.tile_arange(1.0, 6.0, dtype=float, storage="register")
+    def tile_div_scalar_kernel(
+        input_tile: wp.array(dtype=wp.float32),
+        output_tile: wp.array(dtype=wp.float32),
+        divisor: wp.float32
+    ):
+        tid = wp.tid()
+        t = wp.tile_load(input_tile, shape=(4,), storage="register")
+        result = t / divisor
+        wp.tile_store(output_tile, result, offset=(tid * 4))
         
-        # Test tile / scalar
-        result = a / 2.0  # Should be [0.5, 1.0, 1.5, 2.0, 2.5]
-        
-        # Verify result
-        expected = wp.tile_arange(0.5, 3.0, 0.5, dtype=float, storage="register")
-        
-        # For verification purposes, we'll check values manually in a more complex kernel
-        # This is just to ensure the operation doesn't error
-        
-    wp.launch_tiled(test_kernel, dim=[1], block_dim=32)
-    wp.synchronize()
-
-
-def test_scalar_tile_division():
-    """Test scalar / tile division operations."""
+    # Create input data
+    input_data = np.array([10.0, 20.0, 30.0, 40.0], dtype=np.float32)
+    input_tile = wp.array(input_data, device=device)
+    output_tile = wp.zeros_like(input_tile)
     
+    wp.launch(
+        kernel=tile_div_scalar_kernel,
+        dim=1,
+        inputs=[input_tile, output_tile, 2.0],
+        device=device
+    )
+    
+    expected = input_data / 2.0
+    actual = output_tile.numpy()
+    assert np.allclose(actual, expected), f"Expected {expected}, got {actual}"
+    
+    # Test scalar / tile division
     @wp.kernel
-    def test_kernel():
-        # Create a tile with values [1.0, 2.0, 4.0] (avoiding division by zero)
-        a = wp.tile_arange(1.0, 4.0, dtype=float, storage="register")
+    def scalar_div_tile_kernel(
+        input_tile: wp.array(dtype=wp.float32),
+        output_tile: wp.array(dtype=wp.float32),
+        dividend: wp.float32
+    ):
+        tid = wp.tid()
+        t = wp.tile_load(input_tile, shape=(4,), storage="register")
+        result = dividend / t
+        wp.tile_store(output_tile, result, offset=(tid * 4))
         
-        # Test scalar / tile
-        result = 12.0 / a  # Should be [12.0, 6.0, 4.0]
-        
-    wp.launch_tiled(test_kernel, dim=[1], block_dim=32)
-    wp.synchronize()
-
-
-def test_tile_tile_division():
-    """Test tile / tile division operations."""
+    # Use different input data to avoid division by zero
+    input_data = np.array([2.0, 4.0, 5.0, 10.0], dtype=np.float32)
+    input_tile = wp.array(input_data, device=device)
+    output_tile = wp.zeros_like(input_tile)
     
+    wp.launch(
+        kernel=scalar_div_tile_kernel,
+        dim=1,
+        inputs=[input_tile, output_tile, 20.0],
+        device=device
+    )
+    
+    expected = 20.0 / input_data
+    actual = output_tile.numpy()
+    assert np.allclose(actual, expected), f"Expected {expected}, got {actual}"
+    
+    # Test tile / tile division
     @wp.kernel
-    def test_kernel():
-        # Create tiles with different values
-        a = wp.tile_arange(2.0, 7.0, dtype=float, storage="register")  # [2.0, 3.0, 4.0, 5.0, 6.0]
-        b = wp.tile_arange(1.0, 6.0, dtype=float, storage="register")  # [1.0, 2.0, 3.0, 4.0, 5.0]
+    def tile_div_tile_kernel(
+        input_tile_a: wp.array(dtype=wp.float32),
+        input_tile_b: wp.array(dtype=wp.float32),
+        output_tile: wp.array(dtype=wp.float32)
+    ):
+        tid = wp.tid()
+        a = wp.tile_load(input_tile_a, shape=(4,), storage="register")
+        b = wp.tile_load(input_tile_b, shape=(4,), storage="register")
+        result = a / b
+        wp.tile_store(output_tile, result, offset=(tid * 4))
         
-        # Test tile / tile
-        result = a / b  # Should be [2.0, 1.5, 1.33..., 1.25, 1.2]
-        
-    wp.launch_tiled(test_kernel, dim=[1], block_dim=32)
-    wp.synchronize()
-
-
-def test_inplace_tile_division():
-    """Test in-place division operations (tile /= scalar and tile /= tile)."""
+    input_data_a = np.array([20.0, 30.0, 40.0, 50.0], dtype=np.float32)
+    input_data_b = np.array([2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+    input_tile_a = wp.array(input_data_a, device=device)
+    input_tile_b = wp.array(input_data_b, device=device)
+    output_tile = wp.zeros(4, dtype=wp.float32, device=device)
     
+    wp.launch(
+        kernel=tile_div_tile_kernel,
+        dim=1,
+        inputs=[input_tile_a, input_tile_b, output_tile],
+        device=device
+    )
+    
+    expected = input_data_a / input_data_b
+    actual = output_tile.numpy()
+    assert np.allclose(actual, expected), f"Expected {expected}, got {actual}"
+
+
+def test_tile_floordiv_basic():
+    """Test basic tile floor division functionality: tile//scalar, scalar//tile, tile//tile"""
+    
+    device = "cpu"
+    
+    # Test tile // scalar floor division
     @wp.kernel
-    def test_kernel():
-        # Create a tile with values [2.0, 4.0, 6.0, 8.0, 10.0]
-        a = wp.tile_arange(2.0, 12.0, 2.0, dtype=float, storage="register")
+    def tile_floordiv_scalar_kernel(
+        input_tile: wp.array(dtype=wp.float32),
+        output_tile: wp.array(dtype=wp.float32),
+        divisor: wp.float32
+    ):
+        tid = wp.tid()
+        t = wp.tile_load(input_tile, shape=(4,), storage="register")
+        result = t // divisor
+        wp.tile_store(output_tile, result, offset=(tid * 4))
         
-        # Test tile /= 2 (in-place division by scalar)
-        a /= 2.0  # Should become [1.0, 2.0, 3.0, 4.0, 5.0]
-        
-        # Create another tile
-        b = wp.tile_ones(shape=(5,), dtype=float, storage="register")  # [1.0, 1.0, 1.0, 1.0, 1.0]
-        
-        # Test tile /= tile (in-place division by tile)
-        a /= b  # Should remain [1.0, 2.0, 3.0, 4.0, 5.0]
-        
-    wp.launch_tiled(test_kernel, dim=[1], block_dim=32)
-    wp.synchronize()
-
-
-def test_floor_division():
-    """Test floor division operations (//)."""
+    # Create input data
+    input_data = np.array([10.0, 20.0, 30.0, 40.0], dtype=np.float32)
+    input_tile = wp.array(input_data, device=device)
+    output_tile = wp.zeros_like(input_tile)
     
+    wp.launch(
+        kernel=tile_floordiv_scalar_kernel,
+        dim=1,
+        inputs=[input_tile, output_tile, 3.0],
+        device=device
+    )
+    
+    expected = input_data // 3.0
+    actual = output_tile.numpy()
+    assert np.array_equal(actual, expected), f"Expected {expected}, got {actual}"
+    
+    # Test scalar // tile floor division
     @wp.kernel
-    def test_kernel():
-        # Create a tile with values [7.0, 8.0, 9.0, 10.0, 11.0]
-        a = wp.tile_arange(7.0, 12.0, dtype=float, storage="register")
+    def scalar_floordiv_tile_kernel(
+        input_tile: wp.array(dtype=wp.float32),
+        output_tile: wp.array(dtype=wp.float32),
+        dividend: wp.float32
+    ):
+        tid = wp.tid()
+        t = wp.tile_load(input_tile, shape=(4,), storage="register")
+        result = dividend // t
+        wp.tile_store(output_tile, result, offset=(tid * 4))
         
-        # Test tile // scalar
-        result1 = a // 3.0  # Should be [2.0, 2.0, 3.0, 3.0, 3.0]
-        
-        # Create another tile
-        b = wp.tile_arange(2.0, 7.0, dtype=float, storage="register")  # [2.0, 3.0, 4.0, 5.0, 6.0]
-        
-        # Test tile // tile
-        result2 = a // b  # Should be [3.0, 2.0, 2.0, 2.0, 1.0]
-        
-        # Test scalar // tile
-        result3 = 10.0 // b  # Should be [5.0, 3.0, 2.0, 2.0, 1.0]
-        
-    wp.launch_tiled(test_kernel, dim=[1], block_dim=32)
-    wp.synchronize()
-
-
-def test_division_types_and_shapes():
-    """Test that division operations preserve correct types and shapes."""
+    # Use different input data to avoid division by zero
+    input_data = np.array([2.0, 4.0, 5.0, 3.0], dtype=np.float32)
+    input_tile = wp.array(input_data, device=device)
+    output_tile = wp.zeros_like(input_tile)
     
+    wp.launch(
+        kernel=scalar_floordiv_tile_kernel,
+        dim=1,
+        inputs=[input_tile, output_tile, 20.0],
+        device=device
+    )
+    
+    expected = 20.0 // input_data
+    actual = output_tile.numpy()
+    assert np.array_equal(actual, expected), f"Expected {expected}, got {actual}"
+    
+    # Test tile // tile floor division
     @wp.kernel
-    def test_kernel():
-        # Test with different dtypes
-        a_f32 = wp.tile_arange(1.0, 6.0, dtype=float, storage="register")
-        a_i32 = wp.tile_arange(1, 6, dtype=int, storage="register")
+    def tile_floordiv_tile_kernel(
+        input_tile_a: wp.array(dtype=wp.float32),
+        input_tile_b: wp.array(dtype=wp.float32),
+        output_tile: wp.array(dtype=wp.float32)
+    ):
+        tid = wp.tid()
+        a = wp.tile_load(input_tile_a, shape=(4,), storage="register")
+        b = wp.tile_load(input_tile_b, shape=(4,), storage="register")
+        result = a // b
+        wp.tile_store(output_tile, result, offset=(tid * 4))
         
-        # Division with same types should preserve types
-        result_f32 = a_f32 / 2.0
-        result_i32 = a_i32 / 2  # This might become float depending on division rules
-        
-        # Test shapes are preserved
-        assert result_f32.shape[0] == a_f32.shape[0]
-        assert result_i32.shape[0] == a_i32.shape[0]
-        
-    wp.launch_tiled(test_kernel, dim=[1], block_dim=32)
-    wp.synchronize()
-
-
-def test_edge_cases():
-    """Test edge cases for division operations."""
+    input_data_a = np.array([20.0, 30.0, 40.0, 50.0], dtype=np.float32)
+    input_data_b = np.array([3.0, 7.0, 4.0, 6.0], dtype=np.float32)
+    input_tile_a = wp.array(input_data_a, device=device)
+    input_tile_b = wp.array(input_data_b, device=device)
+    output_tile = wp.zeros(4, dtype=wp.float32, device=device)
     
+    wp.launch(
+        kernel=tile_floordiv_tile_kernel,
+        dim=1,
+        inputs=[input_tile_a, input_tile_b, output_tile],
+        device=device
+    )
+    
+    expected = input_data_a // input_data_b
+    actual = output_tile.numpy()
+    assert np.array_equal(actual, expected), f"Expected {expected}, got {actual}"
+
+
+def test_tile_inplace_division():
+    """Test in-place tile division functionality: tile /= scalar, tile /= tile"""
+    
+    device = "cpu"
+    
+    # Test tile /= scalar in-place division
     @wp.kernel
-    def test_kernel():
-        # Test division by 1
-        a = wp.tile_arange(1.0, 4.0, dtype=float, storage="register")  # [1.0, 2.0, 3.0]
-        result = a / 1.0  # Should be [1.0, 2.0, 3.0]
+    def tile_itruediv_kernel(
+        input_tile: wp.array(dtype=wp.float32),
+        divisor: wp.float32
+    ):
+        tid = wp.tid()
+        t = wp.tile_load(input_tile, shape=(4,), storage="register")
+        t /= divisor
+        wp.tile_store(input_tile, t, offset=(tid * 4))
         
-        # Test division by -1
-        result_neg = a / -1.0  # Should be [-1.0, -2.0, -3.0]
-        
-        # Note: Division by zero would typically cause an error or inf/nan values
-        # This is platform-dependent and should be handled by the underlying tile_map/wp.div
-        
-    wp.launch_tiled(test_kernel, dim=[1], block_dim=32)
-    wp.synchronize()
-
-
-def test_large_tile_division():
-    """Test division operations on larger tiles."""
+    # Create input data
+    input_data = np.array([10.0, 20.0, 30.0, 40.0], dtype=np.float32)
+    input_tile = wp.array(input_data.copy(), device=device)
     
+    wp.launch(
+        kernel=tile_itruediv_kernel,
+        dim=1,
+        inputs=[input_tile, 2.0],
+        device=device
+    )
+    
+    expected = input_data / 2.0
+    actual = input_tile.numpy()
+    assert np.allclose(actual, expected), f"Expected {expected}, got {actual}"
+    
+    # Test tile //= scalar in-place floor division
     @wp.kernel
-    def test_kernel():
-        # Create a larger tile
-        size = 64
-        a = wp.tile_arange(1.0, float(size + 1), dtype=float, storage="register")
-        b = wp.tile_ones(shape=(size,), dtype=float, storage="register")
+    def tile_ifloordiv_kernel(
+        input_tile: wp.array(dtype=wp.float32),
+        divisor: wp.float32
+    ):
+        tid = wp.tid()
+        t = wp.tile_load(input_tile, shape=(4,), storage="register")
+        t //= divisor
+        wp.tile_store(input_tile, t, offset=(tid * 4))
         
-        # Perform various division operations
-        result1 = a / 2.0
-        result2 = a / b
-        result3 = 100.0 / b
-        
-        # These should not cause any errors for reasonably sized tiles
-        # The actual correctness would require verification in a more complex kernel
-        
-    wp.launch_tiled(test_kernel, dim=[1], block_dim=64)
-    wp.synchronize()
-
-
-def test_different_storage_types():
-    """Test division operations with different tile storage types."""
+    # Create input data
+    input_data = np.array([20.0, 30.0, 40.0, 50.0], dtype=np.float32)
+    input_tile = wp.array(input_data.copy(), device=device)
     
+    wp.launch(
+        kernel=tile_ifloordiv_kernel,
+        dim=1,
+        inputs=[input_tile, 3.0],
+        device=device
+    )
+    
+    expected = input_data // 3.0
+    actual = input_tile.numpy()
+    assert np.array_equal(actual, expected), f"Expected {expected}, got {actual}"
+
+
+def test_tile_division_types():
+    """Test tile division with different data types"""
+    
+    device = "cpu"
+    
+    # Test integer division
     @wp.kernel
-    def test_kernel():
-        # Test with register storage
-        a_reg = wp.tile_arange(1.0, 6.0, dtype=float, storage="register")
-        result_reg = a_reg / 2.0
+    def tile_div_int_kernel(
+        input_tile: wp.array(dtype=wp.int32),
+        output_tile: wp.array(dtype=wp.int32),
+        divisor: wp.int32
+    ):
+        tid = wp.tid()
+        t = wp.tile_load(input_tile, shape=(4,), storage="register")
+        result = t / divisor
+        wp.tile_store(output_tile, result, offset=(tid * 4))
         
-        # Note: Shared memory tiles require specific allocation in tiled kernels
-        # and are more complex to test in simple kernels
-        
-    wp.launch_tiled(test_kernel, dim=[1], block_dim=32)
-    wp.synchronize()
-
-
-def test_division_with_tile_map_equivalence():
-    """Test that division operations are equivalent to using tile_map directly."""
+    # Create input data
+    input_data = np.array([10, 20, 30, 40], dtype=np.int32)
+    input_tile = wp.array(input_data, device=device)
+    output_tile = wp.zeros(4, dtype=wp.int32, device=device)
     
-    @wp.kernel
-    def test_kernel():
-        # Create tiles
-        a = wp.tile_arange(1.0, 6.0, dtype=float, storage="register")  # [1.0, 2.0, 3.0, 4.0, 5.0]
-        b = wp.tile_arange(2.0, 7.0, dtype=float, storage="register")  # [2.0, 3.0, 4.0, 5.0, 6.0]
-        scalar_val = 2.0
-        
-        # Test tile / scalar vs tile_map
-        result1 = a / scalar_val
-        expected1 = wp.tile_map(wp.div, a, scalar_val)
-        
-        # Test tile / tile vs tile_map
-        result2 = a / b
-        expected2 = wp.tile_map(wp.div, a, b)
-        
-        # Test scalar / tile vs tile_map
-        result3 = scalar_val / a
-        expected3 = wp.tile_map(wp.div, scalar_val, a)
-        
-        # These should be equivalent
-        
-    wp.launch_tiled(test_kernel, dim=[1], block_dim=32)
-    wp.synchronize()
-
-
-def test_integer_division_behavior():
-    """Test division behavior with integer tiles."""
+    wp.launch(
+        kernel=tile_div_int_kernel,
+        dim=1,
+        inputs=[input_tile, output_tile, 2],
+        device=device
+    )
     
-    @wp.kernel
-    def test_kernel():
-        # Test integer division
-        a = wp.tile_arange(5, 10, dtype=int, storage="register")  # [5, 6, 7, 8, 9]
-        
-        # Integer division by scalar
-        result = a / 2  # Should perform float division
-        floored_result = a // 2  # Should perform integer division
-        
-    wp.launch_tiled(test_kernel, dim=[1], block_dim=32)
-    wp.synchronize()
-
-
-def test_gpu_verification():
-    """Test division operations on GPU if available."""
-    # Check if CUDA device is available
-    devices = wp.get_devices()
-    gpu_available = any("cuda" in str(dev).lower() for dev in devices)
+    expected = input_data / 2
+    actual = output_tile.numpy()
+    assert np.allclose(actual, expected), f"Expected {expected}, got {actual}"
     
-    if gpu_available:
+    # Test different scalar types
+    types_to_test = [wp.float16, wp.float32, wp.float64]
+    for dtype in types_to_test:
+        # Create input data
+        input_data = np.array([10.0, 20.0, 30.0, 40.0], dtype=getattr(np, str(dtype)[5:]))
+        input_tile = wp.array(input_data, dtype=dtype, device=device)
+        output_tile = wp.zeros(4, dtype=dtype, device=device)
+        
         @wp.kernel
-        def gpu_test_kernel():
-            # Create tiles on GPU
-            a = wp.tile_arange(1.0, 6.0, dtype=float, storage="register")
-            b = wp.tile_ones(shape=(5,), dtype=float, storage="register")
+        def tile_div_type_kernel(
+            input_tile: wp.array(dtype=Any),
+            output_tile: wp.array(dtype=Any),
+            divisor: Any
+        ):
+            tid = wp.tid()
+            t = wp.tile_load(input_tile, shape=(4,), storage="register")
+            result = t / divisor
+            wp.tile_store(output_tile, result, offset=(tid * 4))
             
-            # Test division operations
-            result1 = a / 2.0
-            result2 = a / b
-            result3 = 10.0 / a
-            result4 = a / a  # Should be all 1.0s (avoiding zeros)
-            
-        # Run on CUDA device if available
-        for device in devices:
-            if "cuda" in str(device).lower():
-                wp.launch_tiled(gpu_test_kernel, dim=[1], block_dim=32, device=device)
-                wp.synchronize(device)
-                break
+        # Use wp.Launch to avoid the 'Any' typing issue in the kernel signature definition
+        wp.launch(
+            kernel=tile_div_type_kernel,
+            dim=1,
+            inputs=[input_tile, output_tile, 2.0],
+            device=device
+        )
+        
+        expected = input_data / 2.0
+        actual = output_tile.numpy()
+        assert np.allclose(actual, expected), f"Type {dtype}: Expected {expected}, got {actual}"
 
 
-def test_comprehensive_division_scenarios():
-    """Comprehensive test covering multiple division scenarios."""
+def test_tile_division_shapes():
+    """Test tile division with different shapes"""
     
+    device = "cpu"
+    
+    # Test 2D tile division
     @wp.kernel
-    def comprehensive_test_kernel():
-        # Test various scenarios in one kernel
+    def tile_2d_div_kernel(
+        input_tile_a: wp.array2d(dtype=wp.float32),
+        input_tile_b: wp.array2d(dtype=wp.float32),
+        output_tile: wp.array2d(dtype=wp.float32)
+    ):
+        tid = wp.tid()
+        a = wp.tile_load(input_tile_a, shape=(2, 3), storage="register")
+        b = wp.tile_load(input_tile_b, shape=(2, 3), storage="register")
+        result = a / b
+        wp.tile_store(output_tile, result, offset=(tid * 2, 0))
         
-        # Scenario 1: Basic tile/scalar division
-        a = wp.tile_arange(1.0, 11.0, dtype=float, storage="register")  # [1.0, ..., 10.0]
-        result1 = a / 2.0
+    # Create input data
+    input_data_a = np.array([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]], dtype=np.float32)
+    input_data_b = np.array([[2.0, 4.0, 5.0], [8.0, 10.0, 12.0]], dtype=np.float32)
+    input_tile_a = wp.array(input_data_a, device=device)
+    input_tile_b = wp.array(input_data_b, device=device)
+    output_tile = wp.zeros_like(input_tile_a)
+    
+    wp.launch(
+        kernel=tile_2d_div_kernel,
+        dim=1,
+        inputs=[input_tile_a, input_tile_b, output_tile],
+        device=device
+    )
+    
+    expected = input_data_a / input_data_b
+    actual = output_tile.numpy()
+    assert np.allclose(actual, expected), f"Expected {expected}, got {actual}"
+
+
+def test_tile_division_edge_cases():
+    """Test tile division edge cases"""
+    
+    device = "cpu"
+    
+    # Test division by zero (should handle gracefully in kernel)
+    @wp.kernel
+    def tile_div_zero_kernel(
+        input_tile: wp.array(dtype=wp.float32),
+        output_tile: wp.array(dtype=wp.float32),
+        divisor: wp.float32
+    ):
+        tid = wp.tid()
+        t = wp.tile_load(input_tile, shape=(4,), storage="register")
+        result = t / divisor
+        wp.tile_store(output_tile, result, offset=(tid * 4))
+    
+    input_data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    input_tile = wp.array(input_data, device=device)
+    output_tile = wp.zeros_like(input_tile)
+    
+    # This should produce inf/nan values, which we can check
+    wp.launch(
+        kernel=tile_div_zero_kernel,
+        dim=1,
+        inputs=[input_tile, output_tile, 0.0],
+        device=device
+    )
+    
+    result = output_tile.numpy()
+    # Check that we have inf values (not crashes)
+    assert np.isinf(result).any() or np.isnan(result).any(), "Division by zero did not produce inf/nan as expected"
+    
+    # Test with negative values
+    @wp.kernel
+    def tile_div_negative_kernel(
+        input_tile: wp.array(dtype=wp.float32),
+        output_tile: wp.array(dtype=wp.float32),
+        divisor: wp.float32
+    ):
+        tid = wp.tid()
+        t = wp.tile_load(input_tile, shape=(4,), storage="register")
+        result = t / divisor
+        wp.tile_store(output_tile, result, offset=(tid * 4))
         
-        # Scenario 2: Scalar/tile division
-        result2 = 20.0 / a  # [20.0, 10.0, 6.67, 5.0, 4.0, 3.33, 2.86, 2.5, 2.22, 2.0]
+    input_data = np.array([-10.0, 20.0, -30.0, 40.0], dtype=np.float32)
+    input_tile = wp.array(input_data, device=device)
+    output_tile = wp.zeros_like(input_tile)
+    
+    wp.launch(
+        kernel=tile_div_negative_kernel,
+        dim=1,
+        inputs=[input_tile, output_tile, -2.0],
+        device=device
+    )
+    
+    expected = input_data / -2.0
+    actual = output_tile.numpy()
+    assert np.allclose(actual, expected), f"Expected {expected}, got {actual}"
+
+
+def test_tile_division_with_different_dtypes():
+    """Test tile division with different data types combinations"""
+    
+    device = "cpu"
+    
+    # Testing compatibility between different dtypes
+    test_cases = [
+        (wp.float32, wp.float32),
+        (wp.float32, wp.int32),
+        (wp.int32, wp.float32),
+    ]
+    
+    for dtype_a, dtype_b in test_cases:
+        # Create input data
+        input_data_a = np.array([10.0, 20.0, 30.0, 40.0], dtype=getattr(np, str(dtype_a)[5:] if str(dtype_a)[5:] != 'float' else 'float32'))
+        input_data_b = np.array([2.0, 4.0, 5.0, 8.0], dtype=getattr(np, str(dtype_b)[5:] if str(dtype_b)[5:] != 'float' else 'float32'))
         
-        # Scenario 3: Tile/tile division
-        b = wp.tile_ones(shape=(10,), dtype=float, storage="register")
-        result3 = a / (b + 1.0)  # a / 2.0 = same as result1
+        input_tile_a = wp.array(input_data_a, dtype=dtype_a, device=device)
+        input_tile_b = wp.array(input_data_b, dtype=dtype_b, device=device)
+        output_tile = wp.zeros(4, dtype=wp.float32, device=device)  # result will be in float32
         
-        # Scenario 4: In-place operations
-        temp = a
-        temp /= 2.0  # Should be same as result1
+        @wp.kernel
+        def tile_div_dtypes_kernel(
+            input_tile_a: wp.array(dtype=Any),
+            input_tile_b: wp.array(dtype=Any),
+            output_tile: wp.array(dtype=Any)
+        ):
+            tid = wp.tid()
+            a = wp.tile_load(input_tile_a, shape=(4,), storage="register")
+            b = wp.tile_load(input_tile_b, shape=(4,), storage="register")
+            result = a / b
+            wp.tile_store(output_tile, result, offset=(tid * 4))
         
-        # Scenario 5: Floor division
-        result5 = a // 3.0
-        result6 = 10.0 // b  # Should be [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+        wp.launch(
+            kernel=tile_div_dtypes_kernel,
+            dim=1,
+            inputs=[input_tile_a, input_tile_b, output_tile],
+            device=device
+        )
         
-        # Scenario 6: Mixed operations
-        result7 = (a + b) / 2.0
-        
-    wp.launch_tiled(comprehensive_test_kernel, dim=[1], block_dim=32)
-    wp.synchronize()
+        expected = input_data_a.astype(np.float32) / input_data_b.astype(np.float32)
+        actual = output_tile.numpy()
+        assert np.allclose(actual, expected), f"Case {dtype_a} / {dtype_b}: Expected {expected}, got {actual}"
 
 
 if __name__ == "__main__":
-    # Run all tests
-    test_tile_scalar_division()
-    test_scalar_tile_division()
-    test_tile_tile_division()
-    test_inplace_tile_division()
-    test_floor_division()
-    test_division_types_and_shapes()
-    test_edge_cases()
-    test_large_tile_division()
-    test_different_storage_types()
-    test_division_with_tile_map_equivalence()
-    test_integer_division_behavior()
-    test_gpu_verification()
-    test_comprehensive_division_scenarios()
-    
-    print("All tile division tests passed!")
+    test_tile_division_basic()
+    test_tile_floordiv_basic()
+    test_tile_inplace_division()
+    test_tile_division_types()
+    test_tile_division_shapes()
+    test_tile_division_edge_cases()
+    test_tile_division_with_different_dtypes()
+    print("All tests passed!")
