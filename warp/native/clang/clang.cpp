@@ -16,6 +16,7 @@
  */
 
 #include "../native/crt.h"
+#include "../version.h"
 
 #include <clang/Frontend/CompilerInstance.h>
 #include <clang/Basic/DiagnosticOptions.h>
@@ -101,7 +102,7 @@ static void initialize_llvm()
     llvm::InitializeAllAsmPrinters();
 }
 
-static std::unique_ptr<llvm::Module> source_to_llvm(bool is_cuda, const std::string& input_file, const char* cpp_src, const char* include_dir, bool debug, bool verify_fp, llvm::LLVMContext& context)
+static std::unique_ptr<llvm::Module> source_to_llvm(bool is_cuda, const std::string& input_file, const char* cpp_src, const char* include_dir, bool debug, bool verify_fp, llvm::LLVMContext& context, bool tiles_in_stack_memory)
 {
     // Compilation arguments
     std::vector<const char*> args;
@@ -128,6 +129,16 @@ static std::unique_ptr<llvm::Module> source_to_llvm(bool is_cuda, const std::str
         #if defined(__x86_64__) || defined(_M_X64)
             args.push_back("-target-feature");
             args.push_back("+f16c");  // Enables support for _Float16
+        #endif
+
+        #if defined(__aarch64__)
+        if(tiles_in_stack_memory)
+        {
+            // Static memory support is broken on AArch64 CPUs. As a workaround we reserve some stack memory on kernel entry,
+            // and point the callee-saved x28 register to it so we can access it anywhere. See tile_shared_storage_t in tile.h.
+            args.push_back("-target-feature");
+            args.push_back("+reserve-x28");
+        }
         #endif
     }
 
@@ -188,6 +199,11 @@ static std::unique_ptr<llvm::Module> source_to_llvm(bool is_cuda, const std::str
             compiler_instance.getPreprocessorOpts().addMacroDef("WP_VERIFY_FP");
         }
 
+        if(tiles_in_stack_memory)
+        {
+            compiler_instance.getPreprocessorOpts().addMacroDef("WP_ENABLE_TILES_IN_STACK_MEMORY");
+        }
+
         compiler_instance.getLangOpts().MicrosoftExt = 1;  // __forceinline / __int64
         compiler_instance.getLangOpts().DeclSpecKeyword = 1;  // __declspec
     }
@@ -207,12 +223,12 @@ static std::unique_ptr<llvm::Module> source_to_llvm(bool is_cuda, const std::str
 
 extern "C" {
 
-WP_API int wp_compile_cpp(const char* cpp_src, const char *input_file, const char* include_dir, const char* output_file, bool debug, bool verify_fp, bool fuse_fp)
+WP_API int wp_compile_cpp(const char* cpp_src, const char *input_file, const char* include_dir, const char* output_file, bool debug, bool verify_fp, bool fuse_fp, bool tiles_in_stack_memory)
 {
     initialize_llvm();
 
     llvm::LLVMContext context;
-    std::unique_ptr<llvm::Module> module = source_to_llvm(false, input_file, cpp_src, include_dir, debug, verify_fp, context);
+    std::unique_ptr<llvm::Module> module = source_to_llvm(false, input_file, cpp_src, include_dir, debug, verify_fp, context, tiles_in_stack_memory);
 
     if(!module)
     {
@@ -220,7 +236,11 @@ WP_API int wp_compile_cpp(const char* cpp_src, const char *input_file, const cha
     }
 
     std::string error;
+     #if LLVM_VERSION_MAJOR >= 22
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(llvm::Triple(target_triple), error);
+    #else
     const llvm::Target* target = llvm::TargetRegistry::lookupTarget(target_triple, error);
+    #endif
 
     const char* CPU = "generic";
     const char* features = "";
@@ -263,7 +283,7 @@ WP_API int wp_compile_cuda(const char* cpp_src, const char *input_file, const ch
     initialize_llvm();
 
     llvm::LLVMContext context;
-    std::unique_ptr<llvm::Module> module = source_to_llvm(true, input_file, cpp_src, include_dir, debug, false, context);
+    std::unique_ptr<llvm::Module> module = source_to_llvm(true, input_file, cpp_src, include_dir, debug, false, context, false);
 
     if(!module)
     {
@@ -271,7 +291,12 @@ WP_API int wp_compile_cuda(const char* cpp_src, const char *input_file, const ch
     }
 
     std::string error;
+
+    #if LLVM_VERSION_MAJOR >= 22
+    const llvm::Target* target = llvm::TargetRegistry::lookupTarget(llvm::Triple("nvptx64-nvidia-cuda"), error);
+    #else
     const llvm::Target* target = llvm::TargetRegistry::lookupTarget("nvptx64-nvidia-cuda", error);
+    #endif
 
     const char* CPU = "sm_70";
     const char* features = "+ptx75";  // Warp requires CUDA 11.5, which supports PTX ISA 7.5
@@ -419,6 +444,10 @@ WP_API int wp_load_obj(const char* object_file, const char* module_name)
             SYMBOL(coshf), SYMBOL_T(cosh, double(*)(double)),
             SYMBOL(tanhf), SYMBOL_T(tanh, double(*)(double)),
             SYMBOL(fmaf), SYMBOL_T(fma, double(*)(double, double, double)),
+            SYMBOL(erff), SYMBOL_T(erf, double(*)(double)),
+            SYMBOL(erfcf), SYMBOL_T(erfc, double(*)(double)),
+            SYMBOL(erfinvf), SYMBOL_T(erfinv, double(*)(double)),
+            SYMBOL(erfcinvf), SYMBOL_T(erfcinv, double(*)(double)),
             SYMBOL(memcpy), SYMBOL(memset), SYMBOL(memmove),
             SYMBOL(_wp_assert),
             SYMBOL(_wp_isfinite),
@@ -500,6 +529,11 @@ WP_API uint64_t wp_lookup(const char* dll_name, const char* function_name)
     }
 
     return func->getValue();
+}
+
+WP_API const char* wp_warp_clang_version()
+{
+    return WP_VERSION_STRING;
 }
 
 }  // extern "C"

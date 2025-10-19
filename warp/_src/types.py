@@ -18,6 +18,7 @@ from __future__ import annotations
 import builtins
 import ctypes
 import enum
+import functools
 import inspect
 import math
 import struct
@@ -325,6 +326,7 @@ def _rbinary_op(self, op, x, t, cw=True):
     return t(*(warp.context.call_builtin_from_desc(desc, (b, a)) for a, b in zip(self, x)))
 
 
+@functools.lru_cache(maxsize=None)
 def vector(length, dtype):
     # canonicalize dtype
     if dtype == int:
@@ -369,7 +371,11 @@ def vector(length, dtype):
             if num_args == 0:
                 super().__init__()
             elif num_args == 1:
-                if hasattr(args[0], "__len__"):
+                if type_generic_equal(args[0], self):
+                    # copy constructor.
+                    for i in range(self._shape_[0]):
+                        super().__setitem__(i, vec_t.scalar_import(args[0][i]))
+                elif hasattr(args[0], "__len__"):
                     # try to copy from expanded sequence, e.g. (1, 2, 3)
                     self.__init__(*args[0])
                 else:
@@ -527,6 +533,7 @@ def vector(length, dtype):
     return vec_t
 
 
+@functools.lru_cache(maxsize=None)
 def matrix(shape, dtype):
     assert len(shape) == 2
 
@@ -576,7 +583,13 @@ def matrix(shape, dtype):
             if num_args == 0:
                 super().__init__()
             elif num_args == 1:
-                if hasattr(args[0], "__len__"):
+                if type_generic_equal(args[0], self):
+                    # copy constructor.
+                    for i in range(self._shape_[0]):
+                        offset = i * self._shape_[1]
+                        for j in range(self._shape_[1]):
+                            super().__setitem__(offset + j, mat_t.scalar_import(args[0][i, j]))
+                elif hasattr(args[0], "__len__"):
                     # try to copy from expanded sequence, e.g. [[1, 0], [0, 1]]
                     self.__init__(*args[0])
                 else:
@@ -590,6 +603,14 @@ def matrix(shape, dtype):
                     super().__setitem__(i, mat_t.scalar_import(args[i]))
             elif num_args == self._shape_[0]:
                 # row vectors
+                if any(type_is_vector(x) for x in args):
+                    warp.utils.warn(
+                        "In the future, the matrix constructor won't support taking row vectors as input arguments. "
+                        "Use `wp.matrix_from_rows()` or `wp.matrix_from_cols()` instead.",
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+
                 for i, row in enumerate(args):
                     if not hasattr(row, "__len__") or len(row) != self._shape_[1]:
                         raise TypeError(
@@ -808,8 +829,11 @@ def matrix(shape, dtype):
             elif isinstance(key, slice):
                 indices = range(*key.indices(self._shape_[0]))
                 row_vecs = tuple(self.get_row(x) for x in indices)
-                shape = (len(row_vecs), self._shape_[1])
-                return matrix(shape, self._wp_scalar_type_)(*row_vecs)
+                if not row_vecs:
+                    shape = (0, self._shape_[1])
+                    return matrix(shape, self._wp_scalar_type_)()
+
+                return matrix_from_rows(*row_vecs)
             else:
                 raise KeyError(f"Invalid key {key}, expected int or pair of ints")
 
@@ -1006,30 +1030,45 @@ class scalar_base:
         return int(self.value)
 
     def __add__(self, y):
+        if is_array(y):
+            return NotImplemented
+
         return warp.add(self, y)
 
     def __radd__(self, y):
         return warp.add(y, self)
 
     def __sub__(self, y):
+        if is_array(y):
+            return NotImplemented
+
         return warp.sub(self, y)
 
     def __rsub__(self, y):
         return warp.sub(y, self)
 
     def __mul__(self, y):
+        if is_array(y):
+            return NotImplemented
+
         return warp.mul(self, y)
 
     def __rmul__(self, x):
         return warp.mul(x, self)
 
     def __truediv__(self, y):
+        if is_array(y):
+            return NotImplemented
+
         return warp.div(self, y)
 
     def __rtruediv__(self, x):
         return warp.div(x, self)
 
     def __mod__(self, x):
+        if is_array(x):
+            return NotImplemented
+
         return warp.mod(self, x)
 
     def __rmod__(self, x):
@@ -1190,27 +1229,28 @@ def transformation(dtype=Any):
         _wp_constructor_ = "transformation"
 
         def __init__(self, *args, **kwargs):
-            if len(args) == 1 and len(kwargs) == 0:
-                if is_float(args[0]) or is_int(args[0]):
-                    # Initialize from a single scalar.
-                    super().__init__(args[0])
-                    return
-                if args[0]._wp_generic_type_str_ == self._wp_generic_type_str_:
-                    # Copy constructor.
-                    super().__init__(*args[0])
-                    return
-
-            try:
-                # For backward compatibility, try to check if the arguments
-                # match the original signature that'd allow initializing
-                # the `p` and `q` components separately.
-                bound_args = self._wp_init_from_components_sig_.bind(*args, **kwargs)
-                bound_args.apply_defaults()
-                p, q = bound_args.args
-            except (TypeError, ValueError):
+            arg_len = len(args)
+            if arg_len == 1:
+                if len(kwargs) == 0:
+                    if is_float(args[0]) or is_int(args[0]):
+                        # Initialize from a single scalar.
+                        super().__init__(args[0])
+                        return
+                    if getattr(args[0], "_wp_generic_type_str_", None) == self._wp_generic_type_str_:
+                        # Copy constructor.
+                        super().__init__(*args[0])
+                        return
+            elif arg_len > 2:
                 # Fallback to the vector's constructor.
                 super().__init__(*args)
                 return
+
+            # For backward compatibility, try to check if the arguments
+            # match the original signature that'd allow initializing
+            # the `p` and `q` components separately.
+            bound_args = self._wp_init_from_components_sig_.bind(*args, **kwargs)
+            bound_args.apply_defaults()
+            p, q = bound_args.args
 
             # Even if the arguments match the original "from components"
             # signature, we still need to make sure that they represent
@@ -1221,9 +1261,6 @@ def transformation(dtype=Any):
                 self[0:3] = p
                 self[3:7] = q
                 return
-
-            # Fallback to the vector's constructor.
-            super().__init__(*args)
 
         def __getattr__(self, name):
             if name == "p":
@@ -2856,11 +2893,12 @@ class array(Array[DType]):
         self.is_contiguous = False
 
     def __del__(self):
-        if self.deleter is None:
-            return
-
-        with self.device.context_guard:
-            self.deleter(self.ptr, self.capacity)
+        try:
+            with self.device.context_guard:
+                self.deleter(self.ptr, self.capacity)
+        except (TypeError, AttributeError):
+            # Suppress TypeError and AttributeError when callables become None during shutdown
+            pass
 
     @property
     def __array_interface__(self):
@@ -3107,23 +3145,16 @@ class array(Array[DType]):
         return self.ctype
 
     def __matmul__(self, other):
-        """
-        Enables A @ B syntax for matrix multiplication
-        """
+        """Matrix multiplication is not supported for wp.array objects."""
         if not is_array(other):
             return NotImplemented
+        raise TypeError("Matrix multiplication (@) is not supported for wp.array objects. Use tile primitives instead.")
 
-        if self.ndim != 2 or other.ndim != 2:
-            raise RuntimeError(
-                f"A has dim = {self.ndim}, B has dim = {other.ndim}. If multiplying with @, A and B must have dim = 2."
-            )
-
-        m = self.shape[0]
-        n = other.shape[1]
-        c = warp.zeros(shape=(m, n), dtype=self.dtype, device=self.device, requires_grad=True)
-        d = warp.zeros(shape=(m, n), dtype=self.dtype, device=self.device, requires_grad=True)
-        matmul(self, other, c, d)
-        return d
+    def __rmatmul__(self, other):
+        """Matrix multiplication is not supported for wp.array objects."""
+        if not is_array(other):
+            return NotImplemented
+        raise TypeError("Matrix multiplication (@) is not supported for wp.array objects. Use tile primitives instead.")
 
     @property
     def grad(self):
@@ -4228,7 +4259,7 @@ class Bvh:
         instance.id = None
         return instance
 
-    def __init__(self, lowers: array, uppers: array, constructor: str | None = None):
+    def __init__(self, lowers: array, uppers: array, constructor: str | None = None, leaf_size: int = 1):
         """Class representing a bounding volume hierarchy.
 
         Depending on which device the input bounds live, it can be either a CPU tree or a GPU tree.
@@ -4244,6 +4275,10 @@ class Bvh:
             constructor: The construction algorithm used to build the tree.
               Valid choices are ``"sah"``, ``"median"``, ``"lbvh"``, or ``None``.
               When ``None``, the default constructor will be used (see the note).
+            leaf_size: The number of primitives (AABBs) stored in each leaf node. The optimal value depends on the primary
+              use case. For intersection queries (e.g., AABB query), a small value like 1 (the default) is generally
+              recommended for optimal performance. For closest point queries, a larger value like 4 or 8 can be more
+              performant. This is an intrinsic parameter which does not impact the return value of the query method.
 
         Note:
             Explanation of BVH constructors:
@@ -4266,8 +4301,20 @@ class Bvh:
 
             Only ``"sah"`` and ``"median"`` are supported for CPU trees. If ``"lbvh"`` is selected for a CPU tree, a
             warning message will be issued, and the constructor will automatically fall back to ``"sah"``.
-        """
 
+            The ``leaf_size`` parameter controls the number of primitives (AABBs) stored in each leaf node of the BVH.
+            This parameter can have a considerable impact on query performance, and the optimal value depends on the
+            types of queries that will be performed:
+
+            - For intersection queries (such as ray or AABB queries), smaller ``leaf_size`` values (e.g., 1) are generally
+              preferred, as they reduce the number of unnecessary primitive checks and can improve traversal speed.
+            - For closest point queries, larger ``leaf_size`` values (e.g., 4 or more) may be beneficial, as they allow
+              more primitives to be checked together, potentially reducing traversal overhead.
+
+            The default value is 1, which is optimal for intersection queries. For use cases that involve both intersection
+            and closest point queries (such as mesh queries), a moderate value (e.g., 4) may provide a good balance.
+            Users are encouraged to experiment with this parameter to find the best value for their specific workload.
+        """
         if len(lowers) != len(uppers):
             raise RuntimeError("The same number of lower and upper bounds must be provided")
 
@@ -4301,6 +4348,9 @@ class Bvh:
         if constructor not in bvh_constructor_values:
             raise ValueError(f"Unrecognized BVH constructor type: {constructor}")
 
+        if leaf_size < 1:
+            raise ValueError(f"leaf_size must be greater than or equal to 1, current value: {leaf_size}")
+
         if self.device.is_cpu:
             if constructor == "lbvh":
                 warp._src.utils.warn(
@@ -4309,7 +4359,7 @@ class Bvh:
                 constructor = "sah"
 
             self.id = self.runtime.core.wp_bvh_create_host(
-                get_data(lowers), get_data(uppers), len(lowers), bvh_constructor_values[constructor]
+                get_data(lowers), get_data(uppers), len(lowers), bvh_constructor_values[constructor], leaf_size
             )
         else:
             self.id = self.runtime.core.wp_bvh_create_device(
@@ -4318,6 +4368,7 @@ class Bvh:
                 get_data(uppers),
                 len(lowers),
                 bvh_constructor_values[constructor],
+                leaf_size,
             )
 
     def __del__(self):
@@ -4418,6 +4469,7 @@ class Mesh:
         velocities: array | None = None,
         support_winding_number: builtins.bool = False,
         bvh_constructor: str | None = None,
+        bvh_leaf_size: int = 4,
     ):
         """Class representing a triangle mesh.
 
@@ -4435,8 +4487,9 @@ class Mesh:
             bvh_constructor: The construction algorithm for the underlying BVH
               (see the docstring of :class:`Bvh` for explanation).
               Valid choices are ``"sah"``, ``"median"``, ``"lbvh"``, or ``None``.
+            bvh_leaf_size: The number of primitives (AABBs) stored in each leaf node
+              (see the docstring of :class:`Bvh` for more details).
         """
-
         if points.device != indices.device:
             raise RuntimeError("Mesh points and indices must live on the same device")
 
@@ -4468,6 +4521,9 @@ class Mesh:
         if bvh_constructor not in bvh_constructor_values:
             raise ValueError(f"Unrecognized BVH constructor type: {bvh_constructor}")
 
+        if bvh_leaf_size < 1:
+            raise ValueError(f"bvh_leaf_size must be greater than or equal to 1, current value: {bvh_leaf_size}")
+
         if self.device.is_cpu:
             if bvh_constructor == "lbvh":
                 warp._src.utils.warn(
@@ -4483,6 +4539,7 @@ class Mesh:
                 int(indices.size / 3),
                 int(support_winding_number),
                 bvh_constructor_values[bvh_constructor],
+                bvh_leaf_size,
             )
         else:
             self.id = self.runtime.core.wp_mesh_create_device(
@@ -4494,6 +4551,7 @@ class Mesh:
                 int(indices.size / 3),
                 int(support_winding_number),
                 bvh_constructor_values[bvh_constructor],
+                bvh_leaf_size,
             )
 
     def __del__(self):
@@ -5590,130 +5648,6 @@ class MeshQueryRay:
     }
 
 
-def matmul(
-    a: array2d,
-    b: array2d,
-    c: array2d,
-    d: array2d,
-    alpha: float = 1.0,
-    beta: float = 0.0,
-    allow_tf32x3_arith: builtins.bool = False,
-):
-    """Computes a generic matrix-matrix multiplication (GEMM) of the form: `d = alpha * (a @ b) + beta * c`.
-
-    .. versionremoved:: 1.7
-
-    .. deprecated:: 1.6
-        Use :doc:`tile primitives </modules/tiles>` instead.
-
-    Args:
-        a (array2d): two-dimensional array containing matrix A
-        b (array2d): two-dimensional array containing matrix B
-        c (array2d): two-dimensional array containing matrix C
-        d (array2d): two-dimensional array to which output D is written
-        alpha (float): parameter alpha of GEMM
-        beta (float): parameter beta of GEMM
-        allow_tf32x3_arith (bool): whether to use CUTLASS's 3xTF32 GEMMs, which enable accuracy similar to FP32
-                                   while using Tensor Cores
-    """
-
-    raise RuntimeError("This function has been removed. Use tile primitives instead.")
-
-
-def adj_matmul(
-    a: array2d,
-    b: array2d,
-    c: array2d,
-    adj_a: array2d,
-    adj_b: array2d,
-    adj_c: array2d,
-    adj_d: array2d,
-    alpha: float = 1.0,
-    beta: float = 0.0,
-    allow_tf32x3_arith: builtins.bool = False,
-):
-    """Computes the adjoint of a generic matrix-matrix multiplication (GEMM) of the form: `d = alpha * (a @ b) + beta * c`.
-        note: the adjoint of parameter alpha is not included but can be computed as `adj_alpha = np.sum(np.concatenate(np.multiply(a @ b, adj_d)))`.
-        note: the adjoint of parameter beta is not included but can be computed as `adj_beta = np.sum(np.concatenate(np.multiply(c, adj_d)))`.
-
-    Args:
-        a (array2d): two-dimensional array containing matrix A
-        b (array2d): two-dimensional array containing matrix B
-        c (array2d): two-dimensional array containing matrix C
-        adj_a (array2d): two-dimensional array to which the adjoint of matrix A is written
-        adj_b (array2d): two-dimensional array to which the adjoint of matrix B is written
-        adj_c (array2d): two-dimensional array to which the adjoint of matrix C is written
-        adj_d (array2d): two-dimensional array containing the adjoint of matrix D
-        alpha (float): parameter alpha of GEMM
-        beta (float): parameter beta of GEMM
-        allow_tf32x3_arith (bool): whether to use CUTLASS's 3xTF32 GEMMs, which enable accuracy similar to FP32
-                                   while using Tensor Cores
-    """
-
-    raise RuntimeError("This function has been removed. Use tile primitives instead.")
-
-
-def batched_matmul(
-    a: array3d,
-    b: array3d,
-    c: array3d,
-    d: array3d,
-    alpha: float = 1.0,
-    beta: float = 0.0,
-    allow_tf32x3_arith: builtins.bool = False,
-):
-    """Computes a batched generic matrix-matrix multiplication (GEMM) of the form: `d = alpha * (a @ b) + beta * c`.
-
-    .. versionremoved:: 1.7
-
-    .. deprecated:: 1.6
-        Use :doc:`tile primitives </modules/tiles>` instead.
-
-    Args:
-        a (array3d): three-dimensional array containing A matrices. Overall array dimension is {batch_count, M, K}
-        b (array3d): three-dimensional array containing B matrices. Overall array dimension is {batch_count, K, N}
-        c (array3d): three-dimensional array containing C matrices. Overall array dimension is {batch_count, M, N}
-        d (array3d): three-dimensional array to which output D is written. Overall array dimension is {batch_count, M, N}
-        alpha (float): parameter alpha of GEMM
-        beta (float): parameter beta of GEMM
-        allow_tf32x3_arith (bool): whether to use CUTLASS's 3xTF32 GEMMs, which enable accuracy similar to FP32
-                                   while using Tensor Cores
-    """
-
-    raise RuntimeError("This function has been removed. Use tile primitives instead.")
-
-
-def adj_batched_matmul(
-    a: array3d,
-    b: array3d,
-    c: array3d,
-    adj_a: array3d,
-    adj_b: array3d,
-    adj_c: array3d,
-    adj_d: array3d,
-    alpha: float = 1.0,
-    beta: float = 0.0,
-    allow_tf32x3_arith: builtins.bool = False,
-):
-    """Computes the adjoint of a batched generic matrix-matrix multiplication (GEMM) of the form: `d = alpha * (a @ b) + beta * c`.
-
-    Args:
-        a (array3d): three-dimensional array containing A matrices. Overall array dimension is {batch_count, M, K}
-        b (array3d): three-dimensional array containing B matrices. Overall array dimension is {batch_count, K, N}
-        c (array3d): three-dimensional array containing C matrices. Overall array dimension is {batch_count, M, N}
-        adj_a (array3d): three-dimensional array to which the adjoints of A matrices are written. Overall array dimension is {batch_count, M, K}
-        adj_b (array3d): three-dimensional array to which the adjoints of B matrices are written. Overall array dimension is {batch_count, K, N}
-        adj_c (array3d): three-dimensional array to which the adjoints of C matrices are written. Overall array dimension is {batch_count, M, N}
-        adj_d (array3d): three-dimensional array containing adjoints of D matrices. Overall array dimension is {batch_count, M, N}
-        alpha (float): parameter alpha of GEMM
-        beta (float): parameter beta of GEMM
-        allow_tf32x3_arith (bool): whether to use CUTLASS's 3xTF32 GEMMs, which enable accuracy similar to FP32
-                                   while using Tensor Cores
-    """
-
-    raise RuntimeError("This function has been removed. Use tile primitives instead.")
-
-
 class HashGrid:
     def __new__(cls, *args, **kwargs):
         instance = super().__new__(cls)
@@ -5816,6 +5750,20 @@ def type_is_generic(t):
 
 def type_is_generic_scalar(t):
     return t in (Scalar, Float, Int)
+
+
+def type_generic_equal(a, b):
+    # More direct alternative to `types_equal()` that also does not error
+    # when one of the argument is a NumPy array.
+
+    if getattr(a, "_wp_generic_type_hint_", "a") is not getattr(b, "_wp_generic_type_hint_", "b"):
+        return False
+
+    for p1, p2 in zip(a._wp_type_params_, b._wp_type_params_):
+        if not scalars_equal(p1, p2, match_generic=False):
+            return False
+
+    return True
 
 
 def type_matches_template(arg_type, template_type):

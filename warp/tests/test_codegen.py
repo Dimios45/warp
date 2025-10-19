@@ -623,10 +623,9 @@ def test_call_syntax():
     pos = wp.vec3(1.0, 2.0, 3.0)
     rot = wp.quat(0.0, 0.0, 0.0, 1.0)
     scale = wp.vec3(2.0, 3.0, 4.0)
-    wp.expect_eq(wp.matrix(pos, rot, scale, wp.float32), expected_matrix)
-    wp.expect_eq(wp.matrix(pos=pos, rot=rot, scale=scale, dtype=wp.float32), expected_matrix)
-    wp.expect_eq(wp.matrix(pos, rot, scale, dtype=wp.float32), expected_matrix)
-    wp.expect_eq(wp.matrix(rot=rot, pos=pos, dtype=wp.float32, scale=scale), expected_matrix)
+    wp.expect_eq(wp.transform_compose(pos, rot, scale), expected_matrix)
+    wp.expect_eq(wp.transform_compose(position=pos, rotation=rot, scale=scale), expected_matrix)
+    wp.expect_eq(wp.transform_compose(rotation=rot, position=pos, scale=scale), expected_matrix)
 
 
 # test shadowing builtin functions
@@ -807,6 +806,25 @@ def test_multiple_return_values(test, device):
     )
 
 
+@wp.struct
+class Pun:
+    f: wp.float16
+    i: wp.int16
+
+
+@wp.kernel
+def test_cast():
+    x = wp.int32(0x3FA00000)
+    x_casted = wp.cast(x, wp.float32)
+    wp.expect_eq(x_casted, 1.25)
+
+    p = Pun()
+    p.f = wp.float16(2.0)
+    p.i = wp.int16(123)
+    p_casted = wp.cast(p, wp.int32)
+    wp.expect_eq(p_casted, 0x007B4000)
+
+
 class TestCodeGen(unittest.TestCase):
     pass
 
@@ -948,6 +966,7 @@ add_function_test(
     name="test_multiple_return_values",
     devices=devices,
 )
+add_kernel_test(TestCodeGen, name="test_cast", kernel=test_cast, dim=1, devices=devices)
 
 
 if __name__ == "__main__":

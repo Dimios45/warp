@@ -285,7 +285,36 @@ add_builtin(
     group="Scalar Math",
     require_original_output_arg=True,
 )
-
+add_builtin(
+    "erf",
+    input_types={"x": Float},
+    value_func=sametypes_create_value_func(Float),
+    doc="Return the error function of ``x``.",
+    group="Scalar Math",
+)
+add_builtin(
+    "erfc",
+    input_types={"x": Float},
+    value_func=sametypes_create_value_func(Float),
+    doc="Return the complementary error function of ``x``.",
+    group="Scalar Math",
+)
+add_builtin(
+    "erfinv",
+    input_types={"x": Float},
+    value_func=sametypes_create_value_func(Float),
+    doc="Return the inverse error function of ``x``.",
+    group="Scalar Math",
+    require_original_output_arg=True,
+)
+add_builtin(
+    "erfcinv",
+    input_types={"x": Float},
+    value_func=sametypes_create_value_func(Float),
+    doc="Return the inverse complementary error function of ``x``.",
+    group="Scalar Math",
+    require_original_output_arg=True,
+)
 add_builtin(
     "round",
     input_types={"x": Float},
@@ -1208,44 +1237,13 @@ add_builtin(
 
 
 def matrix_transform_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
-    warp._src.utils.warn(
-        "the built-in `wp.matrix()` function to construct a 4x4 matrix from a 3D position, quaternion, "
-        "and 3D scale vector will be deprecated in favor of `wp.transform_compose()`.",
-        DeprecationWarning,
-    )
     if arg_types is None:
         return matrix(shape=(4, 4), dtype=Float)
 
-    dtype = arg_values.get("dtype", None)
-
-    value_arg_types = tuple(v for k, v in arg_types.items() if k != "dtype")
-    try:
-        value_type = scalar_infer_type(value_arg_types)
-    except RuntimeError:
-        raise RuntimeError(
-            "all values given when constructing a transformation matrix must have the same type"
-        ) from None
-
-    if dtype is None:
-        dtype = value_type
-    elif not warp._src.types.scalars_equal(value_type, dtype):
-        raise RuntimeError(
-            f"all values used to initialize this transformation matrix are expected to be of the type `{dtype.__name__}`"
-        )
-
-    return matrix(shape=(4, 4), dtype=dtype)
-
-
-def matrix_transform_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
-    # We're in the codegen stage where we emit the code calling the built-in.
-    # Further validate the given argument values if needed and map them
-    # to the underlying C++ function's runtime and template params.
-
-    dtype = return_type._wp_scalar_type_
-
-    func_args = tuple(v for k, v in args.items() if k != "dtype")
-    template_args = (4, 4, dtype)
-    return (func_args, template_args)
+    raise RuntimeError(
+        "the built-in `wp.matrix()` to construct a 4x4 matrix from a 3D position, quaternion, "
+        "and 3D scale vector has been removed in favor of `wp.transform_compose()`."
+    )
 
 
 add_builtin(
@@ -1259,13 +1257,14 @@ add_builtin(
     defaults={"dtype": None},
     value_func=matrix_transform_value_func,
     export_func=lambda input_types: {k: v for k, v in input_types.items() if k != "dtype"},
-    dispatch_func=matrix_transform_dispatch_func,
     native_func="mat_t",
     doc="""Construct a 4x4 transformation matrix that applies the transformations as
     Translation(pos)*Rotation(rot)*Scaling(scale) when applied to column vectors, i.e.: y = (TRS)*x
 
-    .. warning::
-       This function has been deprecated in favor of :func:`warp.math.transform_compose()`.""",
+    .. versionremoved:: 1.10
+       This function has been removed in favor of :func:`warp.math.transform_compose()`.
+
+    .. deprecated:: 1.8""",
     group="Vector Math",
     export=False,
 )
@@ -1757,6 +1756,11 @@ def transformation_dispatch_func(input_types: Mapping[str, type], return_type: A
         func_args = variadic_args
     else:
         func_args = tuple(v for k, v in args.items() if k != "dtype")
+        if "p" in args and "q" not in args:
+            quat_ident = warp._src.codegen.Var(
+                label=None, type=quaternion(dtype=dtype), constant=quaternion(dtype=dtype)(0, 0, 0, 1)
+            )
+            func_args += (quat_ident,)
 
     template_args = (dtype,)
     return (func_args, template_args)
@@ -1765,7 +1769,7 @@ def transformation_dispatch_func(input_types: Mapping[str, type], return_type: A
 add_builtin(
     "transformation",
     input_types={"p": vector(length=3, dtype=Float), "q": quaternion(dtype=Float), "dtype": Float},
-    defaults={"dtype": None},
+    defaults={"q": None, "dtype": None},
     value_func=transformation_pq_value_func,
     export_func=lambda input_types: {k: v for k, v in input_types.items() if k != "dtype"},
     dispatch_func=transformation_dispatch_func,
@@ -2242,6 +2246,85 @@ add_builtin(
     defaults={"storage": "register"},
     value_func=tile_ones_value_func,
     dispatch_func=tile_ones_dispatch_func,
+    is_differentiable=False,
+    hidden=True,
+    group="Tile Primitives",
+    export=False,
+)
+
+
+def tile_full_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, Any]):
+    # return generic type (for doc builds)
+    if arg_types is None:
+        return tile(dtype=Any, shape=Tuple[int, ...])
+
+    shape = extract_tuple(arg_values["shape"], as_constant=True)
+
+    if None in shape:
+        raise ValueError("Tile functions require shape to be a compile time constant.")
+
+    if "value" not in arg_values:
+        raise TypeError("tile_full() missing required keyword argument 'value'")
+
+    if "dtype" not in arg_values:
+        raise TypeError("tile_full() missing required keyword argument 'dtype'")
+
+    if "storage" not in arg_values:
+        raise TypeError("tile_full() missing required keyword argument 'storage'")
+
+    if arg_values["storage"] not in {"shared", "register"}:
+        raise ValueError(f"Invalid value for 'storage': {arg_values['storage']!r}. Expected 'shared' or 'register'.")
+
+    dtype = arg_values["dtype"]
+
+    return tile(dtype=dtype, shape=shape, storage=arg_values["storage"])
+
+
+def tile_full_dispatch_func(arg_types: Mapping[str, type], return_type: Any, arg_values: Mapping[str, Var]):
+    shape = extract_tuple(arg_values["shape"], as_constant=True)
+
+    if None in shape:
+        raise ValueError("Tile functions require shape to be a compile time constant.")
+
+    dtype = arg_values["dtype"]
+    value = arg_values["value"]
+
+    func_args = [value]
+
+    template_args = []
+    template_args.append(dtype)
+    template_args.extend(shape)
+
+    return (func_args, template_args)
+
+
+add_builtin(
+    "tile_full",
+    input_types={"shape": Tuple[int, ...], "value": Any, "dtype": Any, "storage": str},
+    defaults={"storage": "register"},
+    value_func=tile_full_value_func,
+    dispatch_func=tile_full_dispatch_func,
+    is_differentiable=False,
+    doc="""Allocate a tile filled with the specified value.
+
+    :param shape: Shape of the output tile
+    :param value: Value to fill the tile with
+    :param dtype: Data type of output tile's elements
+    :param storage: The storage location for the tile: ``"register"`` for registers
+      (default) or ``"shared"`` for shared memory.
+    :returns: A tile filled with the specified value""",
+    group="Tile Primitives",
+    export=False,
+)
+
+
+# overload for scalar shape
+add_builtin(
+    "tile_full",
+    input_types={"shape": int, "value": Any, "dtype": Any, "storage": str},
+    defaults={"storage": "register"},
+    value_func=tile_full_value_func,
+    dispatch_func=tile_full_dispatch_func,
     is_differentiable=False,
     hidden=True,
     group="Tile Primitives",
@@ -3375,7 +3458,7 @@ add_builtin(
 
 add_builtin(
     "assign",
-    input_types={"dst": tile(dtype=Any, shape=Tuple[int, int]), "i": int, "j": int, "src": Any},
+    input_types={"dst": tile(dtype=Any, shape=Tuple[int, ...]), "i": int, "j": int, "src": Any},
     value_func=tile_assign_value_func,
     group="Tile Primitives",
     export=False,
@@ -3384,7 +3467,40 @@ add_builtin(
 
 add_builtin(
     "assign",
-    input_types={"dst": tile(dtype=Any, shape=Tuple[int, int, int]), "i": int, "j": int, "k": int, "src": Any},
+    input_types={"dst": tile(dtype=Any, shape=Tuple[int, ...]), "i": int, "j": int, "k": int, "src": Any},
+    value_func=tile_assign_value_func,
+    group="Tile Primitives",
+    export=False,
+    hidden=True,
+)
+
+add_builtin(
+    "assign",
+    input_types={
+        "dst": tile(dtype=Any, shape=Tuple[int, ...]),
+        "i": int,
+        "j": int,
+        "k": int,
+        "l": int,
+        "src": Any,
+    },
+    value_func=tile_assign_value_func,
+    group="Tile Primitives",
+    export=False,
+    hidden=True,
+)
+
+add_builtin(
+    "assign",
+    input_types={
+        "dst": tile(dtype=Any, shape=Tuple[int, ...]),
+        "i": int,
+        "j": int,
+        "k": int,
+        "l": int,
+        "m": int,
+        "src": Any,
+    },
     value_func=tile_assign_value_func,
     group="Tile Primitives",
     export=False,
@@ -3399,6 +3515,8 @@ add_builtin(
         "j": int,
         "k": int,
         "l": int,
+        "m": int,
+        "n": int,
         "src": Any,
     },
     value_func=tile_assign_value_func,
@@ -3601,7 +3719,36 @@ def tile_extract_value_func(arg_types, arg_values):
     # force the input tile to shared memory
     arg_types["a"].storage = "shared"
 
-    return arg_types["a"].dtype
+    # count the number of indices (all parameters except the tile "a")
+    num_indices = len(arg_types) - 1
+    tile_dtype = arg_types["a"].dtype
+    tile_shape = arg_types["a"].shape
+
+    if type_is_vector(tile_dtype):
+        if num_indices == len(tile_shape):
+            return tile_dtype
+        elif num_indices == len(tile_shape) + 1:
+            return tile_dtype._wp_scalar_type_
+        else:
+            raise IndexError(
+                f"tile_extract: incorrect number of indices ({num_indices}) for tile shape {tuple(tile_shape)}"
+            )
+    elif type_is_matrix(tile_dtype):
+        if num_indices == len(tile_shape):
+            return tile_dtype
+        elif num_indices == len(tile_shape) + 2:
+            return tile_dtype._wp_scalar_type_
+        else:
+            raise IndexError(
+                f"tile_extract: incorrect number of indices ({num_indices}) for matrix tile shape {tuple(tile_shape)}"
+            )
+    else:
+        # scalar element: index count must exactly match tile rank
+        if num_indices == len(tile_shape):
+            return tile_dtype
+        raise IndexError(
+            f"tile_extract: incorrect number of indices ({num_indices}) for tile shape {tuple(tile_shape)}"
+        )
 
 
 add_builtin(
@@ -3625,7 +3772,48 @@ add_builtin(
 
 add_builtin(
     "tile_extract",
-    input_types={"a": tile(dtype=Any, shape=Tuple[int, int]), "i": int, "j": int},
+    input_types={"a": tile(dtype=Any, shape=Tuple[int, ...]), "i": int, "j": int},
+    value_func=tile_extract_value_func,
+    variadic=False,
+    doc="""Extract a single element from the tile.
+
+    This function will extract an element from the tile and broadcast its value to all threads in the block.
+
+    Note that this may incur additional synchronization if the source tile is a register tile.
+
+    :param a: Tile to extract the element from
+    :param i: Coordinate of element on first dimension
+    :param j: Coordinate of element on the second dimension, or vector index
+    :returns: The value of the element at the specified tile location with the same data type as the input tile""",
+    group="Tile Primitives",
+    hidden=True,
+    export=False,
+)
+
+add_builtin(
+    "tile_extract",
+    input_types={"a": tile(dtype=Any, shape=Tuple[int, ...]), "i": int, "j": int, "k": int},
+    value_func=tile_extract_value_func,
+    variadic=False,
+    doc="""Extract a single element from the tile.
+
+    This function will extract an element from the tile and broadcast its value to all threads in the block.
+
+    Note that this may incur additional synchronization if the source tile is a register tile.
+
+    :param a: Tile to extract the element from
+    :param i: Coordinate of element on first dimension
+    :param j: Coordinate of element on the second dimension, or first matrix index
+    :param k: Coordinate of element on the third dimension, or vector index, or second matrix index
+    :returns: The value of the element at the specified tile location with the same data type as the input tile""",
+    group="Tile Primitives",
+    hidden=True,
+    export=False,
+)
+
+add_builtin(
+    "tile_extract",
+    input_types={"a": tile(dtype=Any, shape=Tuple[int, ...]), "i": int, "j": int, "k": int, "l": int},
     value_func=tile_extract_value_func,
     variadic=False,
     doc="""Extract a single element from the tile.
@@ -3637,7 +3825,9 @@ add_builtin(
     :param a: Tile to extract the element from
     :param i: Coordinate of element on first dimension
     :param j: Coordinate of element on the second dimension
-    :returns: The value of the element at the specified tile location with the same data type as the input tile""",
+    :param k: Coordinate of element on the third dimension, or first matrix index
+    :param l: Coordinate of element on the fourth dimension, or vector index, or second matrix index
+    :returns: The value of the element at the specified tile location, with the same data type as the input tile""",
     group="Tile Primitives",
     hidden=True,
     export=False,
@@ -3645,7 +3835,14 @@ add_builtin(
 
 add_builtin(
     "tile_extract",
-    input_types={"a": tile(dtype=Any, shape=Tuple[int, int, int]), "i": int, "j": int, "k": int},
+    input_types={
+        "a": tile(dtype=Any, shape=Tuple[int, ...]),
+        "i": int,
+        "j": int,
+        "k": int,
+        "l": int,
+        "m": int,
+    },
     value_func=tile_extract_value_func,
     variadic=False,
     doc="""Extract a single element from the tile.
@@ -3658,7 +3855,9 @@ add_builtin(
     :param i: Coordinate of element on first dimension
     :param j: Coordinate of element on the second dimension
     :param k: Coordinate of element on the third dimension
-    :returns: The value of the element at the specified tile location with the same data type as the input tile""",
+    :param l: Coordinate of element on the fourth dimension, or first matrix index
+    :param m: Vector index, or second matrix index
+    :returns: The value of the element at the specified tile location, with the same data type as the input tile""",
     group="Tile Primitives",
     hidden=True,
     export=False,
@@ -3666,7 +3865,15 @@ add_builtin(
 
 add_builtin(
     "tile_extract",
-    input_types={"a": tile(dtype=Any, shape=Tuple[int, int, int, int]), "i": int, "j": int, "k": int, "l": int},
+    input_types={
+        "a": tile(dtype=Any, shape=Tuple[int, int, int, int]),
+        "i": int,
+        "j": int,
+        "k": int,
+        "l": int,
+        "m": int,
+        "n": int,
+    },
     value_func=tile_extract_value_func,
     variadic=False,
     doc="""Extract a single element from the tile.
@@ -3680,6 +3887,8 @@ add_builtin(
     :param j: Coordinate of element on the second dimension
     :param k: Coordinate of element on the third dimension
     :param l: Coordinate of element on the fourth dimension
+    :param m: Vector index, or first matrix index
+    :param n: Second matrix index
     :returns: The value of the element at the specified tile location, with the same data type as the input tile""",
     group="Tile Primitives",
     hidden=True,
@@ -4050,6 +4259,80 @@ add_builtin(
 )
 
 
+def tile_sum_axis_value_func(arg_types, arg_values):
+    if arg_types is None:
+        return tile(dtype=Scalar, shape=Tuple[int, ...])
+
+    a = arg_types["a"]
+
+    if not is_tile(a):
+        raise TypeError(f"tile_sum() 'a' argument must be a tile, got {a!r}")
+
+    # force input tile to shared
+    a.storage = "shared"
+
+    axis = arg_values["axis"]
+    shape = a.shape
+
+    if axis < 0 or axis >= len(shape):
+        raise ValueError(f"tile_sum() axis {axis} is out of bounds for tile with {len(shape)} dimensions")
+
+    # shape is identical less the axis reduction is along
+    if len(shape) > 1:
+        new_shape = shape[:axis] + shape[axis + 1 :]
+    else:
+        new_shape = (1,)
+
+    return tile(dtype=a.dtype, shape=new_shape)
+
+
+def tile_sum_axis_dispatch_func(arg_types: Mapping[str, type], return_type: Any, arg_values: Mapping[str, Var]):
+    tile = arg_values["a"]
+    axis_var = arg_values["axis"]
+    if not hasattr(axis_var, "constant") or axis_var.constant is None:
+        raise ValueError("tile_sum() axis must be a compile-time constant")
+    axis = axis_var.constant
+
+    return ((tile,), (axis,))
+
+
+add_builtin(
+    "tile_sum",
+    input_types={"a": tile(dtype=Scalar, shape=Tuple[int, ...]), "axis": int},
+    value_func=tile_sum_axis_value_func,
+    dispatch_func=tile_sum_axis_dispatch_func,
+    doc="""Cooperatively compute the sum of the tile elements across an axis of the tile using all threads in the block.
+
+    :param a: The input tile. Must reside in shared memory.
+    :param axis: The tile axis to compute the sum across. Must be a compile-time constant.
+    :returns: A tile with the same shape as the input tile less the axis dimension and the same data type as the input tile.
+
+    Example:
+
+    .. code-block:: python
+
+        @wp.kernel
+        def compute():
+
+            t = wp.tile_ones(dtype=float, shape=(8, 8))
+            s = wp.tile_sum(t, axis=0)
+
+            print(s)
+
+        wp.launch_tiled(compute, dim=[1], inputs=[], block_dim=64)
+
+    Prints:
+
+    .. code-block:: text
+
+        [8 8 8 8 8 8 8 8] = tile(shape=(8), storage=register)
+
+    """,
+    group="Tile Primitives",
+    export=False,
+)
+
+
 def tile_sort_value_func(arg_types, arg_values):
     # return generic type (for doc builds)
     if arg_types is None:
@@ -4344,7 +4627,6 @@ add_builtin(
 )
 
 
-# does type propagation for load()
 def tile_reduce_value_func(arg_types, arg_values):
     if arg_types is None:
         return tile(dtype=Scalar, shape=(1,))
@@ -4395,6 +4677,87 @@ add_builtin(
     .. code-block:: text
 
         [362880] = tile(shape=(1), storage=register)
+    """,
+    group="Tile Primitives",
+    export=False,
+    is_differentiable=False,
+)
+
+
+def tile_reduce_axis_value_func(arg_types, arg_values):
+    if arg_types is None:
+        return tile(dtype=Scalar, shape=Tuple[int, ...])
+
+    a = arg_types["a"]
+
+    if not is_tile(a):
+        raise TypeError(f"tile_reduce() 'a' argument must be a tile, got {a!r}")
+
+    # force input tile to shared memory
+    a.storage = "shared"
+
+    axis = arg_values["axis"]
+    shape = a.shape
+
+    if axis < 0 or axis >= len(shape):
+        raise ValueError(f"tile_reduce() axis {axis} is out of bounds for tile with {len(shape)} dimensions")
+
+    # shape is identical less the axis reduction is along
+    if len(shape) > 1:
+        new_shape = shape[:axis] + shape[axis + 1 :]
+    else:
+        new_shape = (1,)
+
+    return tile(dtype=a.dtype, shape=new_shape)
+
+
+add_builtin(
+    "tile_reduce",
+    input_types={"op": Callable, "a": tile(dtype=Scalar, shape=Tuple[int, ...]), "axis": int},
+    value_func=tile_reduce_axis_value_func,
+    native_func="tile_reduce_axis",
+    doc="""Apply a custom reduction operator across a tile axis.
+
+    This function cooperatively performs a reduction using the provided operator across an axis of the tile.
+
+    :param op: A callable function that accepts two arguments and returns one argument, may be a user function or builtin
+    :param a: The input tile, the operator (or one of its overloads) must be able to accept the tile's data type. Must reside in shared memory.
+    :param axis: The tile axis to perform the reduction across. Must be a compile-time constant.
+    :returns: A tile with the same shape as the input tile less the axis dimension and the same data type as the input tile.
+
+    Example:
+
+    .. code-block:: python
+
+        TILE_M = wp.constant(4)
+        TILE_N = wp.constant(2)
+
+        @wp.kernel
+        def compute(x: wp.array2d(dtype=float), y: wp.array(dtype=float)):
+
+            a = wp.tile_load(x, shape=(TILE_M, TILE_N))
+            b = wp.tile_reduce(wp.add, a, axis=1)
+            wp.tile_store(y, b)
+
+        arr = np.arange(TILE_M * TILE_N).reshape(TILE_M, TILE_N)
+
+        x = wp.array(arr, dtype=float)
+        y = wp.zeros(TILE_M, dtype=float)
+
+        wp.launch_tiled(compute, dim=[1], inputs=[x], outputs=[y], block_dim=32)
+
+        print(x.numpy())
+        print(y.numpy())
+
+    Prints:
+
+    .. code-block:: text
+
+        [[0. 1.]
+         [2. 3.]
+         [4. 5.]
+         [6. 7.]]
+        [ 1.  5.  9. 13.]
     """,
     group="Tile Primitives",
     export=False,
@@ -6260,56 +6623,20 @@ def select_value_func(arg_types: Mapping[str, type], arg_values: Mapping[str, An
     if arg_types is None:
         return Any
 
-    v_true = arg_types["value_if_true"]
-    v_false = arg_types["value_if_false"]
-
-    if not types_equal(v_true, v_false):
-        raise RuntimeError(
-            f"select() true value type ({v_true}) must be of the same type as the false type ({v_false})"
-        )
-
-    if is_tile(v_false):
-        if v_true.storage == "register":
-            return v_true
-        if v_false.storage == "register":
-            return v_false
-
-        # both v_true and v_false are shared
-        return tile(
-            dtype=v_true.dtype,
-            shape=v_true.shape,
-            storage=v_true.storage,
-            strides=v_true.strides,
-            layout=v_true.layout,
-            owner=True,
-        )
-
-    return v_true
-
-
-def select_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
-    warp._src.utils.warn(
-        "wp.select() is deprecated and will be removed in a future\n"
-        "version. Use wp.where(cond, value_if_true, value_if_false) instead.",
-        category=DeprecationWarning,
-    )
-
-    func_args = tuple(args.values())
-    template_args = ()
-
-    return (func_args, template_args)
+    raise RuntimeError("wp.select() has been removed. Use wp.where(cond, value_if_true, value_if_false) instead.")
 
 
 add_builtin(
     "select",
     input_types={"cond": builtins.bool, "value_if_false": Any, "value_if_true": Any},
     value_func=select_value_func,
-    dispatch_func=select_dispatch_func,
     doc="""Select between two arguments, if ``cond`` is ``False`` then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
-         ``where(cond, value_if_true, value_if_false)``.""",
+         ``where(cond, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7""",
     group="Utility",
 )
 for t in int_types:
@@ -6317,24 +6644,26 @@ for t in int_types:
         "select",
         input_types={"cond": t, "value_if_false": Any, "value_if_true": Any},
         value_func=select_value_func,
-        dispatch_func=select_dispatch_func,
         doc="""Select between two arguments, if ``cond`` is ``False`` then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
-         ``where(cond, value_if_true, value_if_false)``.""",
+         ``where(cond, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7""",
         group="Utility",
     )
 add_builtin(
     "select",
     input_types={"arr": array(dtype=Any), "value_if_false": Any, "value_if_true": Any},
     value_func=select_value_func,
-    dispatch_func=select_dispatch_func,
     doc="""Select between two arguments, if ``arr`` is null then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
-         ``where(arr, value_if_true, value_if_false)``.""",
+         ``where(arr, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7""",
     group="Utility",
 )
 
@@ -10055,6 +10384,32 @@ add_builtin(
     input_types={"a": tile(dtype=Any, shape=Tuple[int, ...])},
     value_func=static_len_value_func,
     doc="Return the number of rows in a tile.",
+    group="Utility",
+    export=False,
+    is_differentiable=False,
+)
+
+
+def cast_value_func(arg_types, arg_values):
+    # Return generic type for doc builds.
+    if arg_types is None:
+        return Any
+
+    return arg_values["dtype"]
+
+
+def cast_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
+    func_args = (args["a"],)
+    template_args = (args["dtype"],)
+    return (func_args, template_args)
+
+
+add_builtin(
+    "cast",
+    input_types={"a": Any, "dtype": Any},
+    value_func=cast_value_func,
+    dispatch_func=cast_dispatch_func,
+    doc="Reinterpret a value as a different type while preserving its bit pattern.",
     group="Utility",
     export=False,
     is_differentiable=False,

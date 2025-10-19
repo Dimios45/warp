@@ -76,7 +76,7 @@ linux-aarch64 build:
   stage: build
   image: quay.io/pypa/manylinux_2_34_aarch64:latest
   extends:
-    - .omni_devplat_arm_compute
+    - .lnx-aarch64-cpu-medium
     - .save_warp_bin_artifact
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
@@ -355,7 +355,7 @@ linux-aarch64 test:
   image: ubuntu:22.04
   needs: [linux-aarch64 build]
   extends:
-    - .runner-test-linux-aarch64 # TODO: Change to .omni_devplat_arm_docker_gpu
+    - .runner-test-linux-aarch64-gpu
     - .test_common_with_coverage
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
@@ -364,20 +364,43 @@ linux-aarch64 test:
   script:
     - uv run --extra dev -m warp.tests --junit-report-xml rspec.xml --coverage --coverage-xml coverage.xml -s autodetect --failfast
 
-linux-aarch64 test jetson:
+linux-aarch64 test orin:
   needs: [linux-aarch64 build]
-  image: ubuntu:22.04
+  image: ghcr.io/astral-sh/uv:bookworm-slim
   extends:
     - .save_test_report_artifact
     - .basic_test_changes_rules
   before_script:
     - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
-    - !reference [.snippets, install-python+warp-aarch64]
+    - df -h
+    # Move compiled binaries out of platform-specific directory
+    - mv warp/bin/linux-aarch64/warp.so warp/bin/
+    - mv warp/bin/linux-aarch64/warp-clang.so warp/bin/
+    - uv sync --extra dev --no-install-package psutil
+    - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
+  script:
+    - uv run -m warp.tests --maxjobs 4 --junit-report-xml rspec.xml -s autodetect --failfast
+  tags:
+    - gpu/orin
+
+linux-aarch64 test thor:
+  needs: [linux-aarch64 build]
+  image: ghcr.io/astral-sh/uv:bookworm-slim
+  extends:
+    - .save_test_report_artifact
+    - .basic_test_changes_rules
+  before_script:
+    - echo -e "\\e[0Ksection_start:`date +%s`:install_dependencies[collapsed=true]\\r\\e[0KInstalling dependencies"
+    - df -h
+    # Move compiled binaries out of platform-specific directory
+    - mv warp/bin/linux-aarch64/warp.so warp/bin/
+    - mv warp/bin/linux-aarch64/warp-clang.so warp/bin/
+    - uv sync --extra dev
     - echo -e "\\e[0Ksection_end:`date +%s`:install_dependencies\\r\\e[0K"
   script:
     - uv run --extra dev -m warp.tests --junit-report-xml rspec.xml -s autodetect --failfast
   tags:
-    - gpu/orin
+    - gpu/thor
 
 linux-x86_64 test:
   needs: [linux-x86_64 build]
@@ -561,7 +584,7 @@ linux-x86_64 test mujoco warp:
 # Ensure minimum and maximum Python versions are supported
 linux-x86_64 python matrix test:
   stage: test
-  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  image: ghcr.io/astral-sh/uv:bookworm-slim
   needs: [linux-x86_64 build]
   extends:
     - .ipp_lnx_x86_64_gpu
@@ -773,13 +796,13 @@ create pypi wheels:
     - mv warp/bin/libwarp.dylib warp/bin/macos-aarch64/
     - mv warp/bin/libwarp-clang.dylib warp/bin/macos-aarch64/
   script:
-    - sed -i "s/^\(.*\)$/\1+cu12/" VERSION.md # Modify VERSION.md with +cu12
+    - printf '%s+cu12\n' "$(head -n1 VERSION.md | tr -d '\n\r')" > VERSION.md # Modify VERSION.md with +cu12
     - uv build --wheel -C--build-option=-Pwindows-x86_64
     - uv build --wheel -C--build-option=-Plinux-x86_64
     - uv build --wheel -C--build-option=-Plinux-aarch64 -C--build-option=-Mmanylinux_2_34
-    - sed -i "s/^\(.*\)+cu12$/\1+cpu/" VERSION.md # Modify VERSION.md with +cu12 replaced by +cpu
+    - printf '%s+cpu\n' "$(head -n1 VERSION.md | sed 's/+cu12$//' | tr -d '\n\r')" > VERSION.md # Modify VERSION.md with +cu12 replaced by +cpu
     - uv build --wheel -C--build-option=-Pmacos-aarch64
-    - sed -i "s/^\(.*\)+cpu$/\1/" VERSION.md # Revert VERSION.md changes
+    - printf '%s\n' "$(head -n1 VERSION.md | sed 's/+cpu$//' | tr -d '\n\r')" > VERSION.md # Revert VERSION.md changes
     - mv dist dist-github
     # Now make the wheels meant for PyPI publishing
     - uv build --wheel -C--build-option=-Pwindows-x86_64
@@ -817,8 +840,7 @@ create dev wheels:
     - mv warp/bin/libwarp.dylib warp/bin/macos-aarch64/
     - mv warp/bin/libwarp-clang.dylib warp/bin/macos-aarch64/
   script:
-    - uv run tools/ci/publishing/update_git_hash.py # Modify config.py with git hash
-    - uv run tools/ci/publishing/set_nightly_version.py # Modify VERSION.md with dev version
+    # Version files (VERSION.md, config.py, version.h) are already updated from build artifacts
     - uv build --wheel -C--build-option=-Pwindows-x86_64
     - uv build --wheel -C--build-option=-Plinux-x86_64
     - uv build --wheel -C--build-option=-Plinux-aarch64 -C--build-option=-Mmanylinux_2_34
@@ -1041,7 +1063,7 @@ merge request docs:
       - public
   rules:
     - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
-  timeout: 10m
+  timeout: 20m
   environment:
     name: review/$CI_MERGE_REQUEST_IID
     url: https://$CI_PROJECT_ROOT_NAMESPACE.$CI_PAGES_DOMAIN/-/$CI_PROJECT_NAME/-/jobs/$CI_JOB_ID/artifacts/public/index.html
@@ -1051,30 +1073,42 @@ merge request docs:
 # Merge requests: Ensure that exports.h, __init__.pyi, functions.rst have been
 # manually added to the MR if they are changed
 check generated files:
+  stage: deploy
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
   needs:
     - job: linux-x86_64 build
     - job: merge request docs
       optional: true
-  stage: deploy
+  extends:
+    - .ipp_lnx_x86_64_cpu_micro
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+  timeout: 10m
   artifacts:
     when: on_failure
     expose_as: "Generated source files"
     paths:
       - warp/native/exports.h
+      - warp/native/version.h
       - warp/__init__.pyi
       - docs/modules/functions.rst
-  rules:
-    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
-  timeout: 10m
-  extends:
-    - .ipp_lnx_x86_64_cpu_micro
+  before_script:
+    - apt-get update -q
+    - apt-get install -y -q --no-install-recommends git
   script:
+    # Check version consistency across VERSION.md, config.py, and version.h
+    - uv run tools/ci/publishing/check_version_consistency.py --verbose
+    # Check that generated documentation files are committed
     - >
       git diff --exit-code warp/__init__.pyi docs/modules/functions.rst ||
       (echo "Please run build_docs.py (or download from $CI_JOB_URL/artifacts/browse) and add modified files to your merge request." && false)
+    # Check that generated native files are committed
     - >
       git diff --exit-code warp/native/exports.h ||
-      (echo "Please run build_lib.py  (or download from $CI_JOB_URL/artifacts/browse) and add warp/native/exports.h to your merge request." && false)
+      (echo "Please run build_lib.py (or download from $CI_JOB_URL/artifacts/browse) and add warp/native/exports.h to your merge request." && false)
+    - >
+      git diff --exit-code warp/native/version.h ||
+      (echo "Please run build_lib.py (or download from $CI_JOB_URL/artifacts/browse) and add warp/native/version.h to your merge request." && false)
 
 # Build documentation and publish on gitlab-master
 # This only runs in the default branch pipeline. The "pages" name is special for GitLab.
@@ -1083,7 +1117,7 @@ pages:
     - .build-docs-common
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-  timeout: 10m
+  timeout: 20m
   environment:
     name: GitLab Pages
     deployment_tier: staging

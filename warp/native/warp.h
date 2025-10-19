@@ -28,7 +28,7 @@ struct timing_result_t;
 // this is the core runtime API exposed on the DLL level
 extern "C"
 {
-    WP_API int wp_init();
+    WP_API int wp_init(const char* expected_version);
     //WP_API void wp_shutdown();
 
     // get error message from C++
@@ -75,12 +75,12 @@ extern "C"
     WP_API void wp_memtile_host(void* dest, const void* src, size_t srcsize, size_t n);
     WP_API void wp_memtile_device(void* context, void* dest, const void* src, size_t srcsize, size_t n);
 
-	WP_API uint64_t wp_bvh_create_host(wp::vec3* lowers, wp::vec3* uppers, int num_items, int constructor_type);
+	WP_API uint64_t wp_bvh_create_host(wp::vec3* lowers, wp::vec3* uppers, int num_items, int constructor_type, int leaf_size);
 	WP_API void wp_bvh_destroy_host(uint64_t id);
     WP_API void wp_bvh_refit_host(uint64_t id);
     WP_API void wp_bvh_rebuild_host(uint64_t id, int constructor_type);
 
-    WP_API uint64_t wp_bvh_create_device(void* context, wp::vec3* lowers, wp::vec3* uppers, int num_items, int constructor_type);
+    WP_API uint64_t wp_bvh_create_device(void* context, wp::vec3* lowers, wp::vec3* uppers, int num_items, int constructor_type, int leaf_size);
 	WP_API void wp_bvh_destroy_device(uint64_t id);
     WP_API void wp_bvh_refit_device(uint64_t id);
     WP_API void wp_bvh_rebuild_device(uint64_t id);
@@ -88,12 +88,12 @@ extern "C"
     // create a user-accessible copy of the mesh, it is the 
     // users responsibility to keep-alive the points/tris data for the duration of the mesh lifetime
 	WP_API uint64_t wp_mesh_create_host(wp::array_t<wp::vec3> points, wp::array_t<wp::vec3> velocities, wp::array_t<int> tris, 
-        int num_points, int num_tris, int support_winding_number, int constructor_type);
+        int num_points, int num_tris, int support_winding_number, int constructor_type, int bvh_leaf_size);
 	WP_API void wp_mesh_destroy_host(uint64_t id);
     WP_API void wp_mesh_refit_host(uint64_t id);
 
 	WP_API uint64_t wp_mesh_create_device(void* context, wp::array_t<wp::vec3> points, wp::array_t<wp::vec3> velocities, 
-        wp::array_t<int> tris, int num_points, int num_tris, int support_winding_number, int constructor_type);
+        wp::array_t<int> tris, int num_points, int num_tris, int support_winding_number, int constructor_type, int bvh_leaf_size);
 	WP_API void wp_mesh_destroy_device(uint64_t id);
     WP_API void wp_mesh_refit_device(uint64_t id);
 
@@ -234,6 +234,7 @@ extern "C"
 
     WP_API int wp_cuda_driver_version();   // CUDA driver version
     WP_API int wp_cuda_toolkit_version();  // CUDA Toolkit version used to build Warp
+    WP_API const char* wp_version();  // Warp native library version string
     WP_API bool wp_cuda_driver_is_initialized();
 
     WP_API int wp_nvrtc_supported_arch_count();

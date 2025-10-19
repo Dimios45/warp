@@ -149,10 +149,6 @@ struct mat_t
         data[3][3] = m33;
     }
 
-    // implemented in quat.h
-    inline CUDA_CALLABLE mat_t(const vec_t<3,Type>& pos, const quat_t<Type>& rot, const vec_t<3,Type>& scale);
-
-
     inline CUDA_CALLABLE mat_t(const initializer_array<Rows * Cols, Type> &l)
     {
         for (unsigned i=0; i < Rows; ++i)
@@ -205,6 +201,17 @@ struct mat_t
 
     // row major storage assumed to be compatible with PyTorch
     Type data[Rows < 1 ? 1 : Rows][Cols < 1 ? 1 : Cols];
+};
+
+// Type trait to detect if a type is a mat_t
+template<typename T>
+struct is_matrix {
+    static constexpr bool value = false;
+};
+
+template<unsigned Rows, unsigned Cols, typename Type>
+struct is_matrix<mat_t<Rows, Cols, Type>> {
+    static constexpr bool value = true;
 };
 
 template<typename Type>

@@ -157,11 +157,6 @@ from warp._src.types import MeshQueryAABB as MeshQueryAABB
 from warp._src.types import MeshQueryPoint as MeshQueryPoint
 from warp._src.types import MeshQueryRay as MeshQueryRay
 
-from warp._src.types import matmul as matmul
-from warp._src.types import adj_matmul as adj_matmul
-from warp._src.types import batched_matmul as batched_matmul
-from warp._src.types import adj_batched_matmul as adj_batched_matmul
-
 from warp._src.types import vector as vec
 from warp._src.types import matrix as mat
 
@@ -1928,6 +1923,26 @@ def pow(x: Float, y: Float) -> Float:
     ...
 
 @over
+def erf(x: Float) -> Float:
+    """Return the error function of ``x``."""
+    ...
+
+@over
+def erfc(x: Float) -> Float:
+    """Return the complementary error function of ``x``."""
+    ...
+
+@over
+def erfinv(x: Float) -> Float:
+    """Return the inverse error function of ``x``."""
+    ...
+
+@over
+def erfcinv(x: Float) -> Float:
+    """Return the inverse complementary error function of ``x``."""
+    ...
+
+@over
 def round(x: Float) -> Float:
     """Return the nearest integer value to ``x``, rounding halfway cases away from zero.
 
@@ -2182,8 +2197,10 @@ def matrix(pos: Vector[3, Float], rot: Quaternion[Float], scale: Vector[3, Float
     """Construct a 4x4 transformation matrix that applies the transformations as
     Translation(pos)*Rotation(rot)*Scaling(scale) when applied to column vectors, i.e.: y = (TRS)*x
 
-    .. warning::
-       This function has been deprecated in favor of :func:`warp.math.transform_compose()`.
+    .. versionremoved:: 1.10
+       This function has been removed in favor of :func:`warp.math.transform_compose()`.
+
+    .. deprecated:: 1.8
     """
     ...
 
@@ -2516,6 +2533,19 @@ def tile_ones(shape: Tuple[int, ...], dtype: Any, storage: str) -> Tile[Any, Tup
     :param storage: The storage location for the tile: ``"register"`` for registers
       (default) or ``"shared"`` for shared memory.
     :returns: A one-initialized tile with shape and data type as specified
+    """
+    ...
+
+@over
+def tile_full(shape: Tuple[int, ...], value: Any, dtype: Any, storage: str) -> Tile[Any, Tuple[int, ...]]:
+    """Allocate a tile filled with the specified value.
+
+    :param shape: Shape of the output tile
+    :param value: Value to fill the tile with
+    :param dtype: Data type of output tile's elements
+    :param storage: The storage location for the tile: ``"register"`` for registers
+      (default) or ``"shared"`` for shared memory.
+    :returns: A tile filled with the specified value
     """
     ...
 
@@ -2894,6 +2924,37 @@ def tile_broadcast(a: Tile[Any, Tuple[int, ...]], shape: Tuple[int, ...]) -> Til
     ...
 
 @over
+def tile_sum(a: Tile[Scalar, Tuple[int, ...]], axis: int32) -> Tile[Scalar, Tuple[int, ...]]:
+    """Cooperatively compute the sum of the tile elements across an axis of the tile using all threads in the block.
+
+    :param a: The input tile. Must reside in shared memory.
+    :param axis: The tile axis to compute the sum across. Must be a compile-time constant.
+    :returns: A tile with the same shape as the input tile less the axis dimension and the same data type as the input tile.
+
+    Example:
+
+    .. code-block:: python
+
+        @wp.kernel
+        def compute():
+            t = wp.tile_ones(dtype=float, shape=(8, 8))
+            s = wp.tile_sum(t, axis=0)
+
+            print(s)
+
+        wp.launch_tiled(compute, dim=[1], inputs=[], block_dim=64)
+
+    Prints:
+
+    .. code-block:: text
+
+        [8 8 8 8 8 8 8 8] = tile(shape=(8), storage=register)
+
+
+    """
+    ...
+
+@over
 def tile_sum(a: Tile[Scalar, Tuple[int, ...]]) -> Tile[Scalar, Tuple[1]]:
     """Cooperatively compute the sum of the tile elements using all threads in the block.
 
@@ -3105,6 +3166,53 @@ def tile_reduce(op: Callable, a: Tile[Scalar, Tuple[int, ...]]) -> Tile[Scalar, 
     .. code-block:: text
 
         [362880] = tile(shape=(1), storage=register)
+
+    """
+    ...
+
+@over
+def tile_reduce(op: Callable, a: Tile[Scalar, Tuple[int, ...]], axis: int32) -> Tile[Scalar, Tuple[int, ...]]:
+    """Apply a custom reduction operator across a tile axis.
+
+    This function cooperatively performs a reduction using the provided operator across an axis of the tile.
+
+    :param op: A callable function that accepts two arguments and returns one argument, may be a user function or builtin
+    :param a: The input tile, the operator (or one of its overloads) must be able to accept the tile's data type. Must reside in shared memory.
+    :param axis: The tile axis to perform the reduction across. Must be a compile-time constant.
+    :returns: A tile with the same shape as the input tile less the axis dimension and the same data type as the input tile.
+
+    Example:
+
+    .. code-block:: python
+
+        TILE_M = wp.constant(4)
+        TILE_N = wp.constant(2)
+
+        @wp.kernel
+        def compute(x: wp.array2d(dtype=float), y: wp.array(dtype=float)):
+            a = wp.tile_load(x, shape=(TILE_M, TILE_N))
+            b = wp.tile_reduce(wp.add, a, axis=1)
+            wp.tile_store(y, b)
+
+        arr = np.arange(TILE_M * TILE_N).reshape(TILE_M, TILE_N)
+
+        x = wp.array(arr, dtype=float)
+        y = wp.zeros(TILE_M, dtype=float)
+
+        wp.launch_tiled(compute, dim=[1], inputs=[x], outputs=[y], block_dim=32)
+
+        print(x.numpy())
+        print(y.numpy())
+
+    Prints:
+
+    .. code-block:: text
+
+        [[0. 1.]
+         [2. 3.]
+         [4. 5.]
+         [6. 7.]]
+        [ 1.  5.  9. 13.]
 
     """
     ...
@@ -3854,9 +3962,11 @@ def block_dim() -> int:
 def select(cond: bool, value_if_false: Any, value_if_true: Any) -> Any:
     """Select between two arguments, if ``cond`` is ``False`` then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
          ``where(cond, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7
     """
     ...
 
@@ -3864,9 +3974,11 @@ def select(cond: bool, value_if_false: Any, value_if_true: Any) -> Any:
 def select(cond: int8, value_if_false: Any, value_if_true: Any) -> Any:
     """Select between two arguments, if ``cond`` is ``False`` then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
          ``where(cond, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7
     """
     ...
 
@@ -3874,9 +3986,11 @@ def select(cond: int8, value_if_false: Any, value_if_true: Any) -> Any:
 def select(cond: uint8, value_if_false: Any, value_if_true: Any) -> Any:
     """Select between two arguments, if ``cond`` is ``False`` then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
          ``where(cond, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7
     """
     ...
 
@@ -3884,9 +3998,11 @@ def select(cond: uint8, value_if_false: Any, value_if_true: Any) -> Any:
 def select(cond: int16, value_if_false: Any, value_if_true: Any) -> Any:
     """Select between two arguments, if ``cond`` is ``False`` then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
          ``where(cond, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7
     """
     ...
 
@@ -3894,9 +4010,11 @@ def select(cond: int16, value_if_false: Any, value_if_true: Any) -> Any:
 def select(cond: uint16, value_if_false: Any, value_if_true: Any) -> Any:
     """Select between two arguments, if ``cond`` is ``False`` then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
          ``where(cond, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7
     """
     ...
 
@@ -3904,9 +4022,11 @@ def select(cond: uint16, value_if_false: Any, value_if_true: Any) -> Any:
 def select(cond: int32, value_if_false: Any, value_if_true: Any) -> Any:
     """Select between two arguments, if ``cond`` is ``False`` then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
          ``where(cond, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7
     """
     ...
 
@@ -3914,9 +4034,11 @@ def select(cond: int32, value_if_false: Any, value_if_true: Any) -> Any:
 def select(cond: uint32, value_if_false: Any, value_if_true: Any) -> Any:
     """Select between two arguments, if ``cond`` is ``False`` then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
          ``where(cond, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7
     """
     ...
 
@@ -3924,9 +4046,11 @@ def select(cond: uint32, value_if_false: Any, value_if_true: Any) -> Any:
 def select(cond: int64, value_if_false: Any, value_if_true: Any) -> Any:
     """Select between two arguments, if ``cond`` is ``False`` then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
          ``where(cond, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7
     """
     ...
 
@@ -3934,9 +4058,11 @@ def select(cond: int64, value_if_false: Any, value_if_true: Any) -> Any:
 def select(cond: uint64, value_if_false: Any, value_if_true: Any) -> Any:
     """Select between two arguments, if ``cond`` is ``False`` then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
          ``where(cond, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7
     """
     ...
 
@@ -3944,9 +4070,11 @@ def select(cond: uint64, value_if_false: Any, value_if_true: Any) -> Any:
 def select(arr: Array[Any], value_if_false: Any, value_if_true: Any) -> Any:
     """Select between two arguments, if ``arr`` is null then return ``value_if_false``, otherwise return ``value_if_true``.
 
-    .. deprecated:: 1.7
+    .. versionremoved:: 1.10
          Use :func:`where` instead, which has the more intuitive argument order:
          ``where(arr, value_if_true, value_if_false)``.
+
+    .. deprecated:: 1.7
     """
     ...
 
@@ -5444,6 +5572,11 @@ def len(a: Tile[Any, Tuple[int, ...]]) -> int:
 @over
 def len(a: Tuple) -> int:
     """Return the number of elements in a tuple."""
+    ...
+
+@over
+def cast(a: Any, dtype: Any) -> Any:
+    """Reinterpret a value as a different type while preserving its bit pattern."""
     ...
 
 @over

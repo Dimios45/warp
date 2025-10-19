@@ -35,6 +35,11 @@
     #define CUDA_CALLABLE_DEVICE __device__
 #endif
 
+// Tile block dimension used while building the warp core library
+#ifndef WP_TILE_BLOCK_DIM
+#define WP_TILE_BLOCK_DIM 256
+#endif
+
 #ifdef WP_VERIFY_FP
 #define FP_CHECK 1
 #define DO_IF_FPCHECK(X) {X}
@@ -47,6 +52,26 @@
 
 #define RAD_TO_DEG 57.29577951308232087679
 #define DEG_TO_RAD  0.01745329251994329577
+
+#ifndef M_PI_F
+#define M_PI_F 3.14159265358979323846f
+#endif
+
+#ifndef M_2_SQRT_PI_F
+#define M_2_SQRT_PI_F 1.1283791670955125739f  // 2/sqrt(pi)
+#endif
+
+#ifndef M_2_SQRT_PI
+#define M_2_SQRT_PI 1.1283791670955125738961589031215  // 2/sqrt(pi)
+#endif
+
+#ifndef M_SQRT_PI_F_2
+#define M_SQRT_PI_F_2 0.88622692545275801364f  // sqrt(pi)/2
+#endif
+
+#ifndef M_SQRT_PI_2
+#define M_SQRT_PI_2 0.88622692545275801364908374167057  // sqrt(pi)/2
+#endif
 
 #if defined(__CUDACC__) && !defined(_MSC_VER)
 __device__ inline void __debugbreak() { __brkpt(); }
@@ -266,6 +291,13 @@ inline CUDA_CALLABLE half operator / (half a,half b)
 
 
 
+
+template<typename TRet, typename T>
+inline CUDA_CALLABLE TRet cast(T a)
+{
+    static_assert(sizeof(TRet) == sizeof(T), "source and destination must have the same size");
+    return *reinterpret_cast<TRet*>(&a);
+}
 
 template <typename T>
 CUDA_CALLABLE inline float cast_float(T x) { return (float)(x); }
@@ -782,6 +814,7 @@ inline CUDA_CALLABLE half floordiv(half a, half b)
 #endif
     return floorf(float(a/b));
 }
+
 inline CUDA_CALLABLE float floordiv(float a, float b)
 {
 #if FP_CHECK
@@ -793,6 +826,7 @@ inline CUDA_CALLABLE float floordiv(float a, float b)
 #endif
     return floorf(a/b);
 }
+
 inline CUDA_CALLABLE double floordiv(double a, double b)
 {
 #if FP_CHECK
@@ -803,6 +837,210 @@ inline CUDA_CALLABLE double floordiv(double a, double b)
     }
 #endif
     return ::floor(a/b);
+}
+
+inline CUDA_CALLABLE half erf(half a)
+{
+    return erff(float(a));
+}
+
+inline CUDA_CALLABLE float erf(float a)
+{
+    return erff(a);
+}
+
+inline CUDA_CALLABLE double erf(double a)
+{
+    return ::erf(a);
+}
+
+inline CUDA_CALLABLE half erfc(half a)
+{
+    return erfcf(float(a));
+}
+
+inline CUDA_CALLABLE float erfc(float a)
+{
+    return erfcf(a);
+}
+
+inline CUDA_CALLABLE double erfc(double a)
+{
+    return ::erfc(a);
+}
+
+inline CUDA_CALLABLE half erfinv(half a)
+{
+#if FP_CHECK
+    if (float(a) < -1.0f || float(a) > 1.0f)
+    {
+        printf("%s:%d erfinv(%f)\n", __FILE__, __LINE__, float(a));
+        assert(0);
+    }
+#endif
+    return ::erfinvf(float(a));
+}
+
+inline CUDA_CALLABLE float erfinv(float a)
+{
+#if FP_CHECK
+    if (a < -1.0f || a > 1.0f)
+    {
+        printf("%s:%d erfinv(%f)\n", __FILE__, __LINE__, a);
+        assert(0);
+    }
+#endif
+    return ::erfinvf(a);
+}
+
+inline CUDA_CALLABLE double erfinv(double a)
+{
+#if FP_CHECK
+    if (a < -1.0 || a > 1.0)
+    {
+        printf("%s:%d erfinv(%f)\n", __FILE__, __LINE__, a);
+        assert(0);
+    }
+#endif
+    return ::erfinv(a);
+}
+
+inline CUDA_CALLABLE half erfcinv(half a)
+{
+#if FP_CHECK
+    if (float(a) < 0.0f || float(a) > 2.0f)
+    {
+        printf("%s:%d erfcinv(%f)\n", __FILE__, __LINE__, float(a));
+        assert(0);
+    }
+#endif
+    return ::erfcinvf(float(a));
+}
+
+inline CUDA_CALLABLE float erfcinv(float a)
+{
+#if FP_CHECK
+    if (a < 0.0f || a > 2.0f)
+    {
+        printf("%s:%d erfcinv(%f)\n", __FILE__, __LINE__, a);
+        assert(0);
+    }
+#endif
+    return ::erfcinvf(a);
+}
+
+inline CUDA_CALLABLE double erfcinv(double a)
+{
+#if FP_CHECK
+    if (a < 0.0 || a > 2.0)
+    {
+        printf("%s:%d erfcinv(%f)\n", __FILE__, __LINE__, a);
+        assert(0);
+    }
+#endif
+    return ::erfcinv(a);
+}
+
+inline CUDA_CALLABLE void adj_erf(half a, half& adj_a, half adj_ret)
+{
+    adj_a += half(M_2_SQRT_PI_F * ::expf(-float(a)*float(a))) * adj_ret;
+}
+
+inline CUDA_CALLABLE void adj_erf(float a, float& adj_a, float adj_ret)
+{
+    adj_a += M_2_SQRT_PI_F * ::expf(-a*a) * adj_ret;
+}
+
+inline CUDA_CALLABLE void adj_erf(double a, double& adj_a, double adj_ret)
+{
+    adj_a += M_2_SQRT_PI * ::exp(-a*a) * adj_ret;
+}
+
+inline CUDA_CALLABLE void adj_erfc(half a, half& adj_a, half adj_ret)
+{
+    adj_a -= half(M_2_SQRT_PI_F * ::expf(-float(a)*float(a))) * adj_ret;
+}
+
+inline CUDA_CALLABLE void adj_erfc(float a, float& adj_a, float adj_ret)
+{
+    adj_a -= M_2_SQRT_PI_F * ::expf(-a*a) * adj_ret;
+}
+
+inline CUDA_CALLABLE void adj_erfc(double a, double& adj_a, double adj_ret)
+{
+    adj_a -= M_2_SQRT_PI * ::exp(-a*a) * adj_ret;
+}
+
+inline CUDA_CALLABLE void adj_erfinv(half a, half ret, half& adj_a, half adj_ret)
+{
+#if FP_CHECK
+    if (float(a) < -1.0f || float(a) > 1.0f)
+    {
+        printf("%s:%d adj_erfinv(%f)\n", __FILE__, __LINE__, float(a));
+        assert(0);
+    }
+#endif
+    adj_a += half(M_SQRT_PI_F_2 * ::expf(float(ret)*float(ret))) * adj_ret;
+}
+
+inline CUDA_CALLABLE void adj_erfinv(float a, float ret, float& adj_a, float adj_ret)
+{
+#if FP_CHECK
+    if (a < -1.0f || a > 1.0f)
+    {
+        printf("%s:%d adj_erfinv(%f)\n", __FILE__, __LINE__, a);
+        assert(0);
+    }
+#endif
+    adj_a += M_SQRT_PI_F_2 * ::expf(ret*ret) * adj_ret;
+}
+
+inline CUDA_CALLABLE void adj_erfinv(double a, double ret, double& adj_a, double adj_ret)
+{
+#if FP_CHECK
+    if (a < -1.0 || a > 1.0)
+    {
+        printf("%s:%d adj_erfinv(%f)\n", __FILE__, __LINE__, a);
+        assert(0);
+    }
+#endif
+    adj_a += M_SQRT_PI_2 * ::exp(ret*ret) * adj_ret;
+}
+
+inline CUDA_CALLABLE void adj_erfcinv(half a, half ret, half& adj_a, half adj_ret)
+{
+#if FP_CHECK
+    if (float(a) < 0.0f || float(a) > 2.0f)
+    {
+        printf("%s:%d adj_erfcinv(%f)\n", __FILE__, __LINE__, float(a));
+        assert(0);
+    }
+#endif
+    adj_a -= half(M_SQRT_PI_F_2 * ::expf(float(ret)*float(ret))) * adj_ret;
+}
+
+inline CUDA_CALLABLE void adj_erfcinv(float a, float ret, float& adj_a, float adj_ret)
+{
+#if FP_CHECK
+    if (a < 0.0f || a > 2.0f)
+    {
+        printf("%s:%d adj_erfcinv(%f)\n", __FILE__, __LINE__, a);
+        assert(0);
+    }
+#endif
+    adj_a -= M_SQRT_PI_F_2 * ::expf(ret*ret) * adj_ret;
+}
+
+inline CUDA_CALLABLE void adj_erfcinv(double a, double ret, double& adj_a, double adj_ret)
+{
+#if FP_CHECK
+    if (a < 0.0 || a > 2.0)
+    {
+        printf("%s:%d adj_erfcinv(%f)\n", __FILE__, __LINE__, a);
+        assert(0);
+    }
+#endif
+    adj_a -= M_SQRT_PI_2 * ::exp(ret*ret) * adj_ret;
 }
 
 inline CUDA_CALLABLE float leaky_min(float a, float b, float r) { return min(a, b); }
@@ -1085,23 +1323,6 @@ inline CUDA_CALLABLE void adj_frac(T x, T& adj_x, T adj_ret){ }
 DECLARE_ADJOINTS(float16)
 DECLARE_ADJOINTS(float32)
 DECLARE_ADJOINTS(float64)
-
-template <typename C, typename T>
-CUDA_CALLABLE inline T select(const C& cond, const T& a, const T& b)
-{
-    // The double NOT operator !! casts to bool without compiler warnings.
-    return (!!cond) ? b : a;
-}
-
-template <typename C, typename TA, typename TB, typename TRet>
-CUDA_CALLABLE inline void adj_select(const C& cond, const TA& a, const TB& b, C& adj_cond, TA& adj_a, TB& adj_b, const TRet& adj_ret)
-{
-    // The double NOT operator !! casts to bool without compiler warnings.
-    if (!!cond)
-        adj_b += adj_ret;
-    else
-        adj_a += adj_ret;
-}
 
 template <typename C, typename T>
 CUDA_CALLABLE inline T where(const C& cond, const T& a, const T& b)
